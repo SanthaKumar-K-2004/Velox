@@ -189,6 +189,11 @@ CREATE TABLE IF NOT EXISTS api_usage (
     cost_usd NUMERIC,
     timestamp TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS health_check (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    timestamp TIMESTAMPTZ DEFAULT NOW()
+);
 `;
 
     const outputPath = path.resolve(process.cwd(), 'scripts', 'setup.sql');

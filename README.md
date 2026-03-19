@@ -54,7 +54,10 @@ Control your entire email life from Telegram.
 ### 2. Testing & Verification
 For a step-by-step guide on how to verify your setup, see [TESTING_GUIDE.md](TESTING_GUIDE.md).
 
-### 3. Installation
+### 3. 24/7 Uptime (Keep-Alive)
+To prevent Render and Supabase from sleeping on the free tier, follow the [DEPLOYMENT_KEEP_ALIVE.md](DEPLOYMENT_KEEP_ALIVE.md) guide.
+
+### 4. Installation
 ```bash
 git clone https://github.com/SanthaKumar-K-2004/Velox.git
 cd Velox

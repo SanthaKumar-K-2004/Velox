@@ -18,4 +18,28 @@ router.get('/', (req, res) => {
     });
 });
 
+router.get('/db', async (req, res) => {
+    try {
+        const { supabase } = await import('../config/supabase.js');
+        const { data, error } = await supabase
+            .from('health_check')
+            .select('timestamp')
+            .limit(1)
+            .single();
+
+        if (error) throw error;
+
+        res.status(200).json({
+            status: 'db_up',
+            timestamp: new Date().toISOString(),
+            last_check: data.timestamp
+        });
+    } catch (err) {
+        res.status(500).json({
+            status: 'db_error',
+            error: err.message
+        });
+    }
+});
+
 export default router;
