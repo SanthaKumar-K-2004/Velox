@@ -51,7 +51,10 @@ Control your entire email life from Telegram.
 - Google Cloud Project (OAuth2 enabled)
 - Telegram Bot Token (via @BotFather)
 
-### 2. Testing & Verification
+### 2. Deployment (Production)
+For a complete step-by-step guide to deploying on Render.com, see **[RENDER_DEPLOY_GUIDE.md](RENDER_DEPLOY_GUIDE.md)**.
+
+### 3. Testing & Verification
 For a step-by-step guide on how to verify your setup, see [TESTING_GUIDE.md](TESTING_GUIDE.md).
 
 ### 3. 24/7 Uptime (Keep-Alive)
