@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: velox-ai-agent
+    env: node
+    region: oregon
+    plan: free # Can be upgraded to starter/standard
+    buildCommand: "npm install"
+    startCommand: "node src/server.js"
+    healthCheckPath: "/health"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false

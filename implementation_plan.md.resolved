@@ -1,0 +1,777 @@
+# AAEC — AI Autonomous Email Copilot
+# Complete Implementation Plan (10 Phases)
+
+> **Stack:** Node.js + Express | Supabase | Gemini 1.5 Flash | Telegram Bot | Gmail API | Google Apps Script
+> **Target:** < 10MB project size | 100% free-tier infrastructure | Single-user first, multi-user ready
+
+---
+
+## Phase 1 — Project Foundation & Database Setup
+
+### 1.1 Project Structure
+
+```
+E-Mail AI Agent/
+├── src/
+│   ├── server.js                  # Express app entry point
+│   ├── config/
+│   │   ├── env.js                 # Environment variable loader + validation
+│   │   ├── constants.js           # App-wide constants (timeouts, limits, keywords)
+│   │   └── supabase.js            # Supabase client initialization
+│   ├── agents/
+│   │   ├── intake.js              # Agent 1 — Intake Agent
+│   │   ├── filter.js              # Agent 2 — Filter Agent
+│   │   ├── contextBuilder.js      # Agent 3 — Context Builder Agent
+│   │   ├── aiBrain.js             # Agent 4 — AI Brain Agent
+│   │   ├── autonomy.js            # Agent 5 — Autonomy Agent
+│   │   ├── vault.js               # Agent 6 — Document Vault Agent
+│   │   ├── notification.js        # Agent 7 — Notification Agent
+│   │   ├── send.js                # Agent 8 — Send Agent
+│   │   ├── memory.js              # Agent 9 — Memory Agent
+│   │   └── mentor.js              # Agent 10 — Mentor Agent
+│   ├── services/
+│   │   ├── gmail.js               # Gmail API wrapper (read, send, labels, threads)
+│   │   ├── calendar.js            # Google Calendar API wrapper
+│   │   ├── ai.js                  # AI provider abstraction (Gemini → DeepSeek → OpenAI)
+│   │   ├── telegram.js            # Telegram Bot API wrapper + command router
+│   │   └── encryption.js          # AES-256 encrypt/decrypt for tokens & keys
+│   ├── routes/
+│   │   ├── webhook.js             # POST /webhook/email — Apps Script trigger endpoint
+│   │   ├── telegram.js            # POST /webhook/telegram — Telegram updates
+│   │   ├── oauth.js               # GET /auth/google/callback — OAuth2 flow
+│   │   └── health.js              # GET /health — keep-alive + status
+│   ├── middleware/
+│   │   ├── auth.js                # Webhook signature verification
+│   │   ├── rateLimiter.js         # Express rate limiter
+│   │   └── errorHandler.js        # Global error handler
+│   ├── utils/
+│   │   ├── queue.js               # In-memory queue with Supabase persistence fallback
+│   │   ├── logger.js              # Structured logging (console, no external deps)
+│   │   ├── helpers.js             # Date, string, timezone utilities
+│   │   └── mime.js                # MIME message builder for Gmail send
+│   └── templates/
+│       └── telegramMessages.js    # All Telegram message templates (formatted)
+├── scripts/
+│   ├── appsScript.js              # Google Apps Script code (copy to GAS editor)
+│   └── setup.js                   # One-time setup script (DB tables, bot commands)
+├── .env.example                   # Template for environment variables
+├── .gitignore
+├── package.json
+├── README.md
+└── skill.md                       # Original system design document
+```
+
+**Total files: ~30 | Estimated size: < 500KB code + deps under 10MB**
+
+### 1.2 Package Dependencies (Minimal)
+
+```json
+{
+  "dependencies": {
+    "express": "^4.18.2",
+    "@supabase/supabase-js": "^2.39.0",
+    "googleapis": "^130.0.0",
+    "@google/generative-ai": "^0.21.0",
+    "node-telegram-bot-api": "^0.66.0",
+    "dotenv": "^16.3.1",
+    "uuid": "^9.0.0",
+    "sharp": "^0.33.0",
+    "express-rate-limit": "^7.1.4"
+  }
+}
+```
+
+> **Size note:** `googleapis` is heavy (~40MB). We'll use **selective imports** (`googleapis/build/src/apis/gmail`, `googleapis/build/src/apis/calendar`) to keep `node_modules` lean. Alternative: use raw `fetch()` calls to Google APIs to eliminate this dependency entirely (reduces to ~5MB total).
+
+### 1.3 Express Server Setup — `src/server.js`
+
+| Feature | Detail |
+|---|---|
+| Port | `process.env.PORT \|\| 3000` |
+| JSON body parser | `express.json({ limit: '5mb' })` for file uploads |
+| CORS | Disabled (API-only, no browser clients) |
+| Routes mounted | `/webhook/email`, `/webhook/telegram`, `/auth/google/*`, `/health` |
+| Error handler | Global middleware catches all unhandled errors, logs + notifies via Telegram |
+| Startup | Connect Supabase, set Telegram webhook, start cron intervals, log ready |
+
+### 1.4 Environment Configuration — `src/config/env.js`
+
+Validates ALL required env vars on startup. Throws clear error if any missing:
+
+```
+PORT, NODE_ENV
+SUPABASE_URL, SUPABASE_SERVICE_KEY
+GEMINI_API_KEY
+DEEPSEEK_API_KEY (optional)
+OPENAI_API_KEY (optional)
+GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI
+TELEGRAM_BOT_TOKEN
+ENCRYPTION_KEY (32-byte hex for AES-256)
+SYSTEM_ALERT_TELEGRAM_ID
+USER_TIMEZONE (default: Asia/Kolkata)
+```
+
+### 1.5 Supabase Database Schema — 10 Tables
+
+All tables created via `scripts/setup.js` or Supabase dashboard migration.
+
+**Table 1 — `users`** (multi-user ready)
+| Column | Type | Notes |
+|---|---|---|
+| id | UUID PK | `gen_random_uuid()` |
+| email | TEXT UNIQUE | Gmail address |
+| telegram_chat_id | TEXT UNIQUE | Telegram user ID |
+| gmail_token | JSONB | Encrypted OAuth2 tokens (access + refresh) |
+| calendar_enabled | BOOLEAN | Default `true` |
+| gemini_key_encrypted | TEXT | BYOK — user's own Gemini key |
+| plan | TEXT | `free` / `pro` |
+| created_at | TIMESTAMPTZ | `NOW()` |
+
+**Table 2 — `memory`** (Agent 9 — core user profile)
+| Column | Type | Notes |
+|---|---|---|
+| user_id | UUID PK FK→users | One per user |
+| tone_style | TEXT | `formal` / `casual` / `friendly` |
+| formality_score | INTEGER | 0–100 |
+| avg_reply_length | TEXT | `short` / `medium` / `detailed` |
+| common_phrases | JSONB | `["Hi X,", "Thanks,"]` |
+| phrase_bank | JSONB | Frequently used phrases |
+| writing_quirks | JSONB | Unique patterns |
+| sign_off | TEXT | e.g. "Thanks, Arjun" |
+| language | TEXT | `en`, `ta`, `hi` |
+| timezone | TEXT | `Asia/Kolkata` |
+| sleep_start / sleep_end | INTEGER | 22, 7 |
+| response_speed | TEXT | `fast` / `moderate` / `slow` |
+| edit_patterns | JSONB | AI draft vs user edits |
+| accuracy_score | INTEGER | Tracks draft acceptance rate |
+| updated_at | TIMESTAMPTZ | Auto-updated |
+
+**Table 3 — `contact_memory`** (Agent 9 — per-contact)
+| Column | Type |
+|---|---|
+| user_id + contact_email | Composite PK |
+| contact_name | TEXT |
+| relationship | TEXT (`client`/`colleague`/`vendor`/`personal`) |
+| history_note | TEXT |
+| preferred_tone | TEXT |
+| is_vip / is_ignored | BOOLEAN |
+| last_contact | TIMESTAMPTZ |
+| email_count | INTEGER |
+
+**Table 4 — `processed_emails`** (Agent 1 — idempotency)
+| Column | Type |
+|---|---|
+| message_id | TEXT PK |
+| user_id | UUID FK |
+| status | TEXT (`processing`/`done`/`failed`) |
+| locked_at / completed_at | TIMESTAMPTZ |
+
+**Table 5 — `email_history`** (Agent 8 — sent log)
+| Column | Type |
+|---|---|
+| id | UUID PK |
+| user_id, message_id, thread_id, recipient, subject | TEXT |
+| ai_draft, final_sent | TEXT |
+| was_edited | BOOLEAN |
+| edit_diff | JSONB |
+| autonomy_level, confidence | INTEGER |
+| sent_at | TIMESTAMPTZ |
+
+**Table 6 — `vault_metadata`** (Agent 6 — document index)
+| Column | Type |
+|---|---|
+| id | UUID PK |
+| user_id | UUID FK |
+| file_path, file_hash, original_filename, file_type | TEXT |
+| size_kb | INTEGER |
+| doc_type | TEXT (`receipt`/`ticket`/`invoice`/`contract`/`other`) |
+| vendor, amount, summary | TEXT |
+| doc_date, expiry_date | DATE |
+| importance | TEXT (`permanent`/`90days`/`30days`) |
+| search_tags | TEXT[] |
+| extracted_text | TEXT |
+| source | TEXT (`email`/`telegram`) |
+| email_sender | TEXT |
+| expires_at, created_at | TIMESTAMPTZ |
+
+**Table 7 — `pending_sends`** (Agent 5 — survives restarts)
+| Column | Type |
+|---|---|
+| id | UUID PK |
+| user_id | UUID FK |
+| email_to, subject, body | TEXT |
+| attachments | JSONB |
+| thread_id, telegram_message_id | TEXT |
+| send_at | TIMESTAMPTZ |
+| status | TEXT (`pending`/`sent`/`cancelled`) |
+| created_at | TIMESTAMPTZ |
+
+**Table 8 — `follow_ups`** (Agent 10 — tracking)
+| Column | Type |
+|---|---|
+| id | UUID PK |
+| user_id | UUID FK |
+| message_id, recipient, subject | TEXT |
+| sent_at, follow_up_at | TIMESTAMPTZ |
+| status | TEXT (`pending`/`sent`/`dismissed`) |
+| reminder_sent | BOOLEAN |
+
+**Table 9 — `user_status`** (away/active)
+| Column | Type |
+|---|---|
+| user_id | UUID PK FK |
+| status | TEXT (`active`/`away`/`paused`) |
+| away_until | TIMESTAMPTZ |
+| updated_at | TIMESTAMPTZ |
+
+**Table 10 — `auto_send_whitelist`** (user-controlled auto-send)
+| Column | Type |
+|---|---|
+| user_id + email_intent | Composite PK |
+| enabled | BOOLEAN |
+| delay_mins | INTEGER (default 3) |
+| undo_mins | INTEGER (default 15) |
+
+**Supabase Storage:** One bucket `vault` for document files.
+
+---
+
+## Phase 2 — Agent 1 (Intake) + Agent 2 (Filter)
+
+### 2.1 Google Apps Script — `scripts/appsScript.js`
+
+**Purpose:** Trigger on new Gmail → POST to Render server. Runs < 2 seconds.
+
+| Function | Detail |
+|---|---|
+| `onEmailReceived()` | Gmail push trigger → extracts messageId, threadId, from, subject, snippet, hasAttachment |
+| `postToServer(payload)` | `UrlFetchApp.fetch(RENDER_URL + '/webhook/email', { method: 'post', payload })` |
+| Error handling | Silent fail + log to Google Sheet (never blocks Gmail) |
+
+**Setup:** GAS project → Gmail trigger → `onEmailReceived` → installable trigger on new message.
+
+### 2.2 Webhook Route — `src/routes/webhook.js`
+
+- `POST /webhook/email` — receives payload from Apps Script
+- Validates webhook secret header (`X-Webhook-Secret`)
+- Calls `intake.process(emailData)`
+- Returns `200 OK` immediately (async processing)
+
+### 2.3 Agent 1: Intake — `src/agents/intake.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `processEmail(emailData)` | Main entry: dedup check → queue push |
+| `isDuplicate(messageId)` | Checks `processed_emails` table by message_id |
+| `lockEmail(messageId, userId)` | INSERT into `processed_emails` with status `processing` |
+| `pushToQueue(emailData)` | Adds to in-memory queue, triggers pipeline |
+
+**Idempotency:** SELECT from `processed_emails` → if exists, return silently. If not, INSERT with `locked_at` timestamp, then process. This prevents duplicate replies from Apps Script retries.
+
+### 2.4 Agent 2: Filter — `src/agents/filter.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `classify(emailData)` | Returns bucket: `ALWAYS_NOTIFY` / `STORE_AND_DIGEST` / `TRUE_TRASH` / `NEEDS_AI` |
+| `checkBucketA(content)` | Scans for payment, booking, OTP, security, job, contract keywords |
+| `checkBucketB(content)` | Scans for newsletter, github, calendar, promo keywords |
+| `checkBucketC(content)` | Scans for unsubscribe, bulk mail headers, foreign spam |
+| `isHardStop(content)` | Scans for meeting, financial, legal, sensitive keywords → forces Level 3 |
+| `getFilterSignals(content)` | Returns which specific keywords matched (for AI context) |
+
+**Logic flow:**
+1. Check Bucket A → if match → `ALWAYS_NOTIFY` (skip AI, notify immediately)
+2. Check Bucket C → if ALL signals match and ZERO A/B signals → `TRUE_TRASH`
+3. Check Bucket B → if match → `STORE_AND_DIGEST`
+4. Everything else → `NEEDS_AI` (goes to Agent 3 → Agent 4)
+5. Hard stop check runs independently — tags the email regardless of bucket
+
+**Constants in `src/config/constants.js`:**
+- `BUCKET_A_KEYWORDS` — 30+ keywords for always-notify
+- `BUCKET_B_KEYWORDS` — 20+ keywords for digest
+- `BUCKET_C_KEYWORDS` — 15+ keywords for trash
+- `HARD_STOP_KEYWORDS` — 40+ keywords for meetings/finance/legal
+
+---
+
+## Phase 3 — Agent 3 (Context Builder) + Agent 4 (AI Brain)
+
+### 3.1 Gmail Service — `src/services/gmail.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `initializeClient(userId)` | Creates Gmail API client with user's OAuth tokens |
+| `getFullEmail(messageId)` | Fetch full email body + headers + attachments list |
+| `getThreadHistory(threadId, limit=5)` | Last 5 messages in thread (from, date, snippet) |
+| `sendEmail({ to, subject, body, threadId, attachments })` | Sends via Gmail API with MIME builder |
+| `moveToInbox(messageId)` | Moves from spam to inbox |
+| `trashMessage(messageId)` | Moves to trash (for undo) |
+| `getSpamEmails(maxResults=20)` | Fetches recent spam for rescue scanner |
+| `getSentEmails(maxResults=50)` | For memory bootstrap |
+| `refreshToken(userId)` | Auto-refresh expired OAuth tokens, update in Supabase |
+
+**OAuth2 flow** handled in `src/routes/oauth.js`:
+- `GET /auth/google` → redirects to Google consent screen
+- `GET /auth/google/callback` → exchanges code for tokens → encrypts → stores in `users.gmail_token`
+
+### 3.2 Calendar Service — `src/services/calendar.js`
+
+| Function | Purpose |
+|---|---|
+| `checkAvailability(userId, dateTimeHint)` | Returns `{ free, conflicts, freeSlots }` |
+| `findNearbyFreeSlots(dateTimeHint, duration=30)` | Finds 3 nearest free 30-min slots |
+
+### 3.3 Agent 3: Context Builder — `src/agents/contextBuilder.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `buildContext(userId, emailData)` | Main — assembles the complete context package |
+| `getThreadContext(userId, threadId)` | Via `gmail.getThreadHistory()` → last 5 messages |
+| `getCoreMemory(userId)` | Tier 1 memory from `memory` table (~200 tokens) |
+| `getContactMemory(userId, senderEmail)` | Tier 2 from `contact_memory` (if known sender, ~100 tokens) |
+| `getTopicMemory(userId, intent)` | Tier 3 from `memory.edit_patterns` (if intent matches, ~150 tokens) |
+| `getCalendarData(userId, dateTimeHint)` | Via `calendar.checkAvailability()` |
+| `getVaultRelevantDocs(userId, subject)` | Searches `vault_metadata` for related docs |
+| `isNightTime(timezone)` | Checks if current time is in sleep window |
+| `isUserAway(userId)` | Checks `user_status` table |
+
+**Output:** Complete JSON context package (max 450 tokens of memory injected):
+```json
+{
+  "email": {}, "thread_history": [], "core_memory": {},
+  "contact_memory": {}, "topic_memory": {}, "calendar_data": {},
+  "hard_stop": false, "is_night_time": false, "user_away": false,
+  "vault_relevant_docs": [], "filter_signals": []
+}
+```
+
+### 3.4 AI Service — `src/services/ai.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `callAI(prompt, userId)` | Main — tries Gemini → DeepSeek → OpenAI → safe fallback |
+| `callGemini(prompt, apiKey)` | `@google/generative-ai` → `gemini-1.5-flash` → JSON mode |
+| `callDeepSeek(prompt)` | REST API call to DeepSeek chat completions |
+| `callOpenAI(prompt)` | REST API call to OpenAI chat completions |
+| `getSafeFallback()` | Returns hardcoded safe JSON response |
+| `trackUsage(userId)` | Increments daily call count, warns at 80%/97% of limit |
+| `parseAIResponse(raw)` | Extracts JSON from AI response, validates all required fields |
+
+**Fallback chain:** Gemini (429/5xx) → DeepSeek → OpenAI → `SAFE_FALLBACK` constant.
+
+### 3.5 Agent 4: AI Brain — `src/agents/aiBrain.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `processEmail(userId, contextPackage)` | Builds full prompt → calls AI → validates → returns structured result |
+| `buildPrompt(contextPackage)` | Assembles the master prompt with all memory tiers + email + rules |
+| `validateResponse(response)` | Ensures all required JSON fields exist with correct types |
+| `applyHardStopOverride(response, contextPackage)` | Forces `requires_human: true` if hard stop detected |
+
+**Output:** Complete structured JSON (as defined in skill.md Section 5):
+- `classification`, `priority_score`, `urgency`, `summary`, `intent`
+- `draft_reply` or `holding_reply`
+- `autonomy_level`, `requires_human`, `confidence`
+- `entities` (dates, times, amounts, names, deadlines)
+- `follow_up_needed`, `doc_type_detected`, `language_detected`
+
+**Critical rules enforced in prompt:**
+- Never sound like AI
+- Never confirm meetings
+- Never make financial commitments
+- Match user's phrase bank and sign-off
+- Reply under 80 words unless complexity demands more
+- Holding replies use specific time estimates based on current hour
+
+---
+
+## Phase 4 — Agent 5 (Autonomy) + Agent 7 (Notification)
+
+### 4.1 Agent 5: Autonomy — `src/agents/autonomy.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `decide(aiResult, userSettings, isHardStop)` | Returns `{ level, reason, delay_mins, undo_mins }` |
+| `handleLevel1(userId, aiResult)` | Draft ready → send to Notification Agent for Telegram display |
+| `handleLevel2(userId, aiResult)` | Whitelisted → persist to `pending_sends` → delayed send with undo |
+| `handleLevel3(userId, aiResult)` | Hard stop → send to Notification with full context, must approve |
+| `handleTimeout(userId, emailId, priority)` | Timeout logic based on priority tier (routine/important/urgent/VIP/night) |
+| `checkPendingSends()` | Interval (60s) → query `pending_sends` where `send_at <= now` → send |
+
+**Decision matrix:**
+1. Hard stop OR `aiResult.hard_stop` → Level 3 (always)
+2. `intent === 'meeting_request'` → Level 3 (always)
+3. `confidence < 75` → Level 3
+4. Whitelisted category AND `confidence >= 90` → Level 2 (3 min delay, 15 min undo)
+5. Default → Level 1 (draft + notify)
+
+**Timeout rules (from constants):**
+| Priority | Wait | After Timeout | Reminders |
+|---|---|---|---|
+| Routine (<50) | 30 min | Add to digest | 0 |
+| Important (50-79) | 2 hours | Remind once | 1 |
+| Urgent (80+) | 15 min | Remind | 2 (every 30 min) |
+| VIP | 10 min | Remind | 3 (every 20 min) |
+| Night (10pm-7am) | Until 7am | Morning digest | 0 |
+
+### 4.2 Telegram Service — `src/services/telegram.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `initialize()` | Set webhook URL, register bot commands |
+| `sendMessage(chatId, text, options)` | Send formatted message with inline keyboard |
+| `sendWithButtons(chatId, text, buttons)` | Send message with action buttons |
+| `editMessage(chatId, messageId, text, buttons)` | Edit existing message (for undo countdown) |
+| `handleCallback(callbackQuery)` | Process button clicks (Send/Edit/Reject/Undo/etc.) |
+| `setWebhook(url)` | Register Telegram webhook URL |
+
+### 4.3 Agent 7: Notification — `src/agents/notification.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `notifyLevel1(userId, aiResult)` | Draft ready template + [Send][Edit][Later][Skip] buttons |
+| `notifyLevel2Sent(userId, sendRecord)` | Auto-sent notification + [Undo (Xm left)][Thread] buttons |
+| `notifyLevel3(userId, aiResult)` | Urgent template + [Send][Edit][Reject][Thread] buttons |
+| `sendMorningDigest(userId)` | 7am digest: overnight count + urgent/important list |
+| `sendEveningPromoDigest(userId)` | 6pm digest: curated promos (score 60+) |
+| `sendWeeklyReport(userId, stats)` | Monday 9am: stats + suggestions + awaiting replies |
+| `sendSystemHealth(userId, health)` | 8am: API usage, vault size, DB size, uptime |
+| `sendSpamRescue(userId, email)` | Rescued from spam notification + [Move to inbox][VIP][Leave] |
+| `sendDocumentStored(userId, analysis)` | Document stored notification + [View][Forward] |
+| `canSend(userId)` | Rate limiter — max 1 message/second |
+
+**Templates in `src/templates/telegramMessages.js`:**
+All 10 message templates from skill.md Section 8, using Telegram MarkdownV2 formatting.
+
+---
+
+## Phase 5 — Agent 8 (Send Agent)
+
+### 5.1 MIME Builder — `src/utils/mime.js`
+
+| Function | Purpose |
+|---|---|
+| `buildMimeMessage({ to, subject, body, threadId, attachments })` | Constructs RFC 2822 MIME message with proper `In-Reply-To` header for threading |
+| `base64UrlEncode(buffer)` | Gmail API requires URL-safe base64 |
+| `attachFile(mimeBuilder, fileBuffer, filename, mimeType)` | Adds multipart attachment |
+
+### 5.2 Agent 8: Send — `src/agents/send.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `sendEmail(draftId, userId)` | Main — safety check → attach vault doc → human delay → Gmail send → record history → start undo |
+| `addHumanDelay()` | Random 90–180 second delay (looks natural) |
+| `recordInHistory(userId, sendData)` | INSERT into `email_history` |
+| `startUndoWindow(userId, messageId, undoMins)` | Stores undo expiry in memory + Supabase |
+| `undoSend(userId, messageId)` | Check window → `gmail.trashMessage()` → notify user |
+| `processPendingSend(sendRecord)` | Called by Autonomy Agent interval → execute queued send |
+
+**Safety checks before every send:**
+1. `hard_stop === true` → throw error
+2. Undo window stored in Supabase → survives restart
+3. History recorded with both `ai_draft` and `final_sent` for learning
+
+---
+
+## Phase 6 — Agent 6 (Document Vault)
+
+### 6.1 Agent 6: Vault — `src/agents/vault.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `processDocument(file, source, emailContext, userId)` | Full pipeline: analyze → dedup → compress → store → index |
+| `analyzeDocument(file)` | Gemini Vision API call → returns doc_type, vendor, amount, tags |
+| `isDuplicate(userId, fileBuffer)` | MD5 hash check against `vault_metadata.file_hash` |
+| `compressFile(file)` | `sharp` for images (max 100KB), text extraction for docs |
+| `storeFile(userId, file)` | Upload to Supabase Storage bucket `vault` |
+| `indexDocument(userId, metadata)` | INSERT into `vault_metadata` with all extracted fields |
+| `findDocument(userId, naturalQuery)` | Gemini extracts search intent → query `vault_metadata` |
+| `getDocument(userId, docId)` | Fetch file from Supabase Storage |
+| `shareDocument(userId, docId, recipientEmail)` | Download from vault → send as email attachment |
+| `calculateExpiry(importance)` | `permanent`→null, `90days`→+90d, `30days`→+30d |
+| `checkExpiries(userId)` | Daily 8am — find docs expiring in 3 days → notify |
+
+**Supabase Storage config:**
+- Bucket: `vault` (private)
+- Path format: `{userId}/{uuid}_{originalFilename}`
+- Max file: 50MB (Supabase free tier limit)
+
+---
+
+## Phase 7 — Agent 9 (Memory)
+
+### 7.1 Agent 9: Memory — `src/agents/memory.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `bootstrap(userId)` | Day 1: Read last 50 sent emails → Gemini analyzes writing style → store profile |
+| `getCoreMemory(userId)` | Returns Tier 1 constant memory (name, role, tone, sign-off) |
+| `getContactMemory(userId, email)` | Returns Tier 2 for known sender (relationship, history, tone) |
+| `getTopicMemory(userId, intent)` | Returns Tier 3 for matched intent |
+| `learnFromInteraction(userId, interaction)` | Switch on type: edited/approved/rejected/vip/ignore |
+| `handleDraftEdited(userId, aiDraft, finalSent)` | Compute diff → store pattern → adjust tone score |
+| `handleDraftApproved(userId, draft)` | Reinforce style → increment accuracy |
+| `handleDraftRejected(userId, draft, reason)` | Record what went wrong |
+| `addVIP(userId, email)` | Set `is_vip=true` in `contact_memory` |
+| `addIgnored(userId, email)` | Set `is_ignored=true` in `contact_memory` |
+| `updateContactMemory(userId, senderEmail, data)` | Upsert contact relationship info |
+| `detectToneDrift(userId)` | Weekly: compare recent 20 sent emails vs stored profile |
+
+**Bootstrap process (first-time setup):**
+1. Fetch 50 sent emails via Gmail API
+2. Send to Gemini: "Analyze writing style" → extract tone, phrases, quirks, sign-off
+3. 5 onboarding questions via Telegram (sign-off, tone, length, role, VIP senders)
+4. Store combined profile in `memory` table
+
+---
+
+## Phase 8 — Agent 10 (Mentor)
+
+### 8.1 Agent 10: Mentor — `src/agents/mentor.js`
+
+**Functions:**
+
+| Function | Purpose |
+|---|---|
+| `runScheduledJob(jobName, userId)` | Dispatcher for all scheduled tasks |
+| `sendMorningDigest(userId)` | 7am — overnight summary + pending items |
+| `checkSystemHealth(userId)` | 8am — API usage, DB size, vault size, uptime |
+| `checkDocumentExpiries(userId)` | 8am — docs expiring in 3 days |
+| `sendEveningPromoDigest(userId)` | 6pm — curated promos with value scoring |
+| `sendWeeklyReport(userId)` | Mon 9am — stats, suggestions, awaiting replies |
+| `scanSpamFolder(userId)` | Every 30 min — rescue valuable emails from spam |
+| `checkFollowUps(userId)` | Every 60 min — sent emails with no reply > X days |
+| `detectToneDrift(userId)` | Weekly — compare writing style evolution |
+| `calculateRescueScore(email, memory)` | Spam scoring: known domain +60, replied-to +70, VIP +80, high-value content +35 |
+| `scorePromoValue(email, memory)` | Promo scoring: purchased-from +40, 30%+ discount +30, expiring +25 |
+| `detectSenderPatterns(userId)` | Find senders who email on consistent days → suggest templates |
+
+**Scheduled intervals (set in `server.js` startup):**
+
+```javascript
+// Timezone-aware scheduling using setTimeout chains
+scheduleDaily('07:00', () => mentor.sendMorningDigest(userId))
+scheduleDaily('08:00', () => mentor.checkSystemHealth(userId))
+scheduleDaily('08:00', () => mentor.checkDocumentExpiries(userId))
+scheduleDaily('18:00', () => mentor.sendEveningPromoDigest(userId))
+scheduleWeekly('Monday', '09:00', () => mentor.sendWeeklyReport(userId))
+setInterval(() => mentor.scanSpamFolder(userId), 30 * 60 * 1000)
+setInterval(() => mentor.checkFollowUps(userId), 60 * 60 * 1000)
+setInterval(() => autonomy.checkPendingSends(), 60 * 1000)
+```
+
+---
+
+## Phase 9 — Telegram Command System
+
+### 9.1 Command Router — `src/routes/telegram.js`
+
+`POST /webhook/telegram` → parses update → routes to handler.
+
+### 9.2 Full Command List — 24 Commands
+
+**Inbox commands:**
+| Command | Handler function | Description |
+|---|---|---|
+| `/inbox` | `handleInbox(userId)` | Today's important emails |
+| `/pending` | `handlePending(userId)` | Emails waiting for user reply |
+| `/sent` | `handleSent(userId)` | What PA sent today |
+| `/search [text]` | `handleSearch(userId, query)` | Natural language email search |
+
+**Vault commands:**
+| Command | Handler |
+|---|---|
+| `/vault` | `handleVaultList(userId)` — recent docs |
+| `/find [desc]` | `handleVaultFind(userId, query)` — NL doc search |
+| `/files` | `handleFilesList(userId)` — uploaded files |
+| `/share [name] to [email]` | `handleShare(userId, name, email)` |
+
+**Contact commands:**
+| Command | Handler |
+|---|---|
+| `/vip add/remove/list [email]` | `handleVIP(userId, action, email)` |
+| `/ignore add/list [email\|domain]` | `handleIgnore(userId, action, target)` |
+| `/neveragain` | `handleNeverAgain(userId, replyToEmail)` |
+
+**Status commands:**
+| Command | Handler |
+|---|---|
+| `/away [duration]` | `handleAway(userId, duration)` |
+| `/back` | `handleBack(userId)` |
+| `/pause` / `/resume` | `handlePauseResume(userId, action)` |
+| `/status` | `handleStatus(userId)` |
+
+**Settings commands:**
+| Command | Handler |
+|---|---|
+| `/tone [formal\|casual\|friendly]` | `handleTone(userId, style)` |
+| `/autonomy [high\|low]` | `handleAutonomy(userId, level)` |
+| `/undo` | `handleUndo(userId)` |
+| `/undo window [mins]` | `handleUndoWindow(userId, mins)` |
+| `/whitelist add/remove/list [category]` | `handleWhitelist(userId, action, cat)` |
+| `/help` | `handleHelp(userId)` — full command reference |
+
+**Natural language handler:**
+Any non-command text → `handleNaturalLanguage(userId, text)` → Gemini classifies intent → routes to vault_search / email_search / draft_request / status_query / command.
+
+**Callback query handler:**
+Button presses (Send, Edit, Reject, Undo, Later, etc.) → `handleCallback(callbackQuery)` → routes to appropriate agent.
+
+---
+
+## Phase 10 — System Health, Failsafes & Deployment
+
+### 10.1 System Health — `src/middleware/errorHandler.js` + `src/utils/logger.js`
+
+| Feature | Implementation |
+|---|---|
+| Global error handler | Express middleware catches unhandled errors → logs → sends Telegram alert |
+| RAM monitor | Every 5 min: check `process.memoryUsage()` → warn at 70%, restart at 85% |
+| Storage monitor | Daily: check Supabase DB size → warn at 70%, auto-cleanup at 80% |
+| API usage tracking | Before every Gemini call → increment counter → warn at 80%, switch fallback at 97% |
+| Structured logging | `src/utils/logger.js` — JSON logs with timestamp, level, agent, action |
+
+### 10.2 Auto Cleanup — in `src/agents/mentor.js`
+
+- Delete `processed_emails` locks older than 30 days (status `done`)
+- Delete expired vault files (metadata kept forever for searchability)
+- Supabase keep-alive ping every 3 days
+
+### 10.3 Deployment — Render.com
+
+| Config | Value |
+|---|---|
+| Service type | Web Service |
+| Build command | `npm install` |
+| Start command | `node src/server.js` |
+| Instance | Free tier (spins down after 15m inactivity) |
+| Keep-alive | cron-job.org pings `GET /health` every 10 min |
+| Environment | All env vars set in Render dashboard |
+
+### 10.4 Google Apps Script Deployment
+
+1. Create new GAS project at script.google.com
+2. Copy `scripts/appsScript.js` content
+3. Set `RENDER_URL` and `WEBHOOK_SECRET` in GAS Script Properties
+4. Create installable trigger: Gmail → new message → `onEmailReceived`
+
+### 10.5 Supabase Storage Config
+
+- Create `vault` bucket (private, 50MB max per file)
+- RLS policies: users can only access their own files
+
+---
+
+## Complete Pipeline Flow
+
+```
+Gmail → Apps Script trigger
+         ↓
+    POST /webhook/email
+         ↓
+  Agent 1 (Intake) — dedup check → queue
+         ↓
+  Agent 2 (Filter) — classify bucket + hard stop check
+         ↓
+    ┌─ Bucket A → Agent 7 (Notify immediately)
+    ├─ Bucket B → Store for digest
+    ├─ Bucket C → Silent trash
+    └─ Bucket D (NEEDS_AI) ↓
+         ↓
+  Agent 3 (Context) — thread + memory + calendar + vault
+         ↓
+  Agent 4 (AI Brain) — Gemini call → structured JSON
+         ↓
+  Agent 5 (Autonomy) — decide Level 1/2/3
+         ↓
+    ┌─ Level 1 → Agent 7 (Telegram draft + buttons)
+    ├─ Level 2 → pending_sends → delayed auto-send
+    └─ Level 3 → Agent 7 (urgent notification + must approve)
+         ↓
+  User taps button on Telegram
+         ↓
+    ┌─ [Send] → Agent 8 (human delay → Gmail send → history)
+    ├─ [Edit] → User types new text → Agent 8 sends edited
+    ├─ [Reject] → Discard + learn from rejection (Agent 9)
+    └─ [Undo] → Agent 8 (trash sent email within window)
+         ↓
+  Agent 9 (Memory) — learn from every interaction
+  Agent 10 (Mentor) — scheduled digests, reports, spam rescue
+```
+
+---
+
+## Verification Plan
+
+### Automated Testing (per phase)
+
+| Phase | Test | Command |
+|---|---|---|
+| 1 | Supabase connection + table creation | `node scripts/setup.js` — verify all 10 tables created |
+| 2 | Intake dedup test: send same messageId twice | `node test/intake.test.js` — second call returns silently |
+| 2 | Filter classification: test with sample emails | `node test/filter.test.js` — verify bucket assignments |
+| 3 | Context builder: mock email → verify context package shape | `node test/context.test.js` |
+| 4 | AI Brain: mock Gemini response → verify JSON parsing + hard stop override | `node test/aiBrain.test.js` |
+| 5 | Send pipeline: mock Gmail API → verify history recorded | `node test/send.test.js` |
+| All | Health endpoint returns 200 | `curl http://localhost:3000/health` |
+
+### Manual Verification (with user)
+
+1. **OAuth flow:** Open browser → `/auth/google` → complete consent → verify tokens stored encrypted in Supabase
+2. **End-to-end email test:** Send yourself a test email → verify it flows through all agents → appears as Telegram notification with draft and buttons
+3. **Telegram buttons:** Tap Send → verify email sent via Gmail → verify appears in `email_history`
+4. **Hard stop test:** Send email with "let's schedule a meeting" → verify Level 3 notification → must approve
+5. **Undo test:** Send email via PA → tap Undo within window → verify trashed in Gmail
+6. **Vault test:** Forward a receipt email → verify PDF stored in Supabase Storage → searchable via `/find`
+7. **Morning digest:** Wait for 7am trigger or manually call → verify digest appears in Telegram
+
+### User-Assisted Testing
+
+> [!IMPORTANT]
+> After each phase is built, I'll ask you to test the specific features by sending real emails and interacting via Telegram. This ensures everything works with your actual Gmail account and Telegram bot.
+
+---
+
+## Build Order & Dependencies
+
+```mermaid
+graph TD
+    P1["Phase 1: Foundation + DB"] --> P2["Phase 2: Intake + Filter"]
+    P1 --> P3["Phase 3: Context + AI Brain"]
+    P2 --> P3
+    P3 --> P4["Phase 4: Autonomy + Notification"]
+    P4 --> P5["Phase 5: Send Agent"]
+    P1 --> P6["Phase 6: Document Vault"]
+    P1 --> P7["Phase 7: Memory Agent"]
+    P5 --> P8["Phase 8: Mentor Agent"]
+    P4 --> P9["Phase 9: Telegram Commands"]
+    P8 --> P10["Phase 10: Health + Deploy"]
+    P9 --> P10
+```
+
+**Critical path:** Phase 1 → 2 → 3 → 4 → 5 (core email flow working end-to-end)
+**Parallel work:** Phase 6 (Vault) and Phase 7 (Memory) can start after Phase 1

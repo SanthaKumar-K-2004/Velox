@@ -1,0 +1,12 @@
+node_modules/
+.env
+.gemini/
+*.log
+test_results.png
+test_output.txt
+.DS_Store
+dist/
+build/
+coverage/
+.vscode/
+.idea/

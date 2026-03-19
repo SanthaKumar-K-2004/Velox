@@ -1,0 +1,44 @@
+{
+    "name": "velox-email-ai",
+    "version": "1.0.0",
+    "type": "module",
+    "description": "Velox — AI Email Agent powered by 10 intelligent agents",
+    "main": "src/server.js",
+    "scripts": {
+        "start": "node src/server.js",
+        "dev": "node --watch src/server.js",
+        "setup": "node scripts/setup.js",
+        "lint": "eslint .",
+        "test": "node --test"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "keywords": [
+        "velox",
+        "email",
+        "ai",
+        "agent",
+        "telegram",
+        "gmail"
+    ],
+    "author": "Santhakumar K",
+    "license": "MIT",
+    "dependencies": {
+        "@google/generative-ai": "^0.24.1",
+        "@supabase/supabase-js": "^2.99.2",
+        "dotenv": "^17.3.1",
+        "express": "^5.2.1",
+        "express-rate-limit": "^8.3.1",
+        "googleapis": "^171.4.0",
+        "helmet": "^8.1.0",
+        "node-telegram-bot-api": "^0.67.0",
+        "sharp": "^0.34.5",
+        "uuid": "^13.0.0"
+    },
+    "devDependencies": {
+        "@eslint/js": "^10.0.1",
+        "eslint": "^10.0.3",
+        "globals": "^17.4.0"
+    }
+}
