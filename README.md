@@ -57,7 +57,10 @@ For a step-by-step guide on how to verify your setup, see [TESTING_GUIDE.md](TES
 ### 3. 24/7 Uptime (Keep-Alive)
 To prevent Render and Supabase from sleeping on the free tier, follow the [DEPLOYMENT_KEEP_ALIVE.md](DEPLOYMENT_KEEP_ALIVE.md) guide.
 
-### 4. Installation
+### 4. Post-Deployment & Maintenance
+Learn how to monitor your live instance and troubleshoot issues in [MAINTENANCE_GUIDE.md](MAINTENANCE_GUIDE.md).
+
+### 5. Installation
 ```bash
 git clone https://github.com/SanthaKumar-K-2004/Velox.git
 cd Velox
