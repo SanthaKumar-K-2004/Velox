@@ -51,7 +51,10 @@ Control your entire email life from Telegram.
 - Google Cloud Project (OAuth2 enabled)
 - Telegram Bot Token (via @BotFather)
 
-### 2. Installation
+### 2. Testing & Verification
+For a step-by-step guide on how to verify your setup, see [TESTING_GUIDE.md](TESTING_GUIDE.md).
+
+### 3. Installation
 ```bash
 git clone https://github.com/SanthaKumar-K-2004/Velox.git
 cd Velox
