@@ -11,7 +11,8 @@ function escape(value) {
 }
 
 function getConnectUrl(userId) {
-    const externalUrl = process.env.PUBLIC_URL || process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL;
+    // Prioritize environment variables, otherwise use the user's specific Render link
+    const externalUrl = process.env.PUBLIC_URL || process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || 'https://velox-f2uy.onrender.com';
     let baseUrl;
 
     if (externalUrl) {
