@@ -38,7 +38,7 @@ export const telegramCommands = {
                 'I am your AI email assistant. I read your emails, draft replies, ' +
                 'and notify you right here on Telegram.\n\n' +
                 '🔗 *Setup:* Connect your Gmail first:\n' +
-                `${env.googleRedirectUri.replace('/auth/google/callback', '/auth/google')}?userId=${user.id}\n\n` +
+                `${(process.env.RENDER_EXTERNAL_URL ? process.env.RENDER_EXTERNAL_URL + '/auth/google' : env.googleRedirectUri.replace('/auth/google/callback', '/auth/google'))}?userId=${user.id}\n\n` +
                 'Reuse the same link anytime to connect another Gmail account.\n\n' +
                 'Type /help to see all commands.';
 
