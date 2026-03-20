@@ -63,7 +63,7 @@ async function startServer() {
         } else {
             // Production: Webhook mode
             const externalUrl = process.env.PUBLIC_URL || process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || 'https://velox-f2uy.onrender.com';
-            const webhookUrl = `${externalUrl.replace(/\/$/, '')}/webhook/telegram`;
+            const webhookUrl = `${externalUrl.replace(/\/$/, '')}/webhook/telegram/${env.telegramBotToken}`;
             await telegramService.getBot().setWebHook(webhookUrl);
             logger.info('Telegram', 'Webhook', `Production Webhook active and pointing to ${webhookUrl}`);
         }
