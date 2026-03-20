@@ -50,14 +50,19 @@ export const telegramCommands = {
                 `Your AI Email Copilot is ready. [🔗 Connect your Gmail](${connectUrl}) to get started.\n\n` +
                 'Once connected, I\'ll analyze your writing style and we can finish the setup.';
 
+            // Telegram API rejects 'localhost' in inline buttons. 
+            // If in dev mode (localhost), we omit the button and rely entirely on the markdown text link above.
+            const buttons = [];
+            if (!connectUrl.startsWith('http://localhost')) {
+                buttons.push([{ text: '🔗 Connect Gmail', url: connectUrl }]);
+            }
+            buttons.push([{ text: '📖 View Commands', callback_data: 'show_help' }]);
+
             // Use inline URL button — always clickable, enterprise-grade UX
-            await telegramService.sendWithButtons(chatId, text, [
-                [{ text: '🔗 Connect Gmail', url: connectUrl }],
-                [{ text: '📖 View Commands', callback_data: 'show_help' }],
-            ]);
+            await telegramService.sendWithButtons(chatId, text, buttons);
         } catch (err) {
             logger.error('Telegram', 'StartFail', 'Failed to handle /start', err);
-            await telegramService.sendMessage(chatId, '⚠️ Registration failed. Please try again later.');
+            await telegramService.sendMessage(chatId, `⚠️ Registration failed. Error: ${err.message}. Please try again later.`);
         }
     },
 
