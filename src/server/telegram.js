@@ -7,6 +7,7 @@ import { sendAgent } from '../agents/send.js';
 import { memoryAgent } from '../agents/memory.js';
 import { supabase } from '../config/supabase.js';
 import { nlHandler } from '../agents/nlHandler.js';
+import { vaultAgent } from '../agents/vault.js';
 
 const router = express.Router();
 
@@ -66,8 +67,35 @@ async function handleUpdate(update) {
         const userId = await telegramCommands.resolveUser(chatId);
         if (!userId) return telegramService.sendMessage(chatId, '👋 Please say "start" to register first.');
 
-        return telegramService.sendMessage(chatId, '📎 File received! I will process and store this in your Vault shortly.');
-        // Implementation for downloading and OCR will go here
+        await telegramService.sendMessage(chatId, '📎 File received! I am analyzing and storing this in your Vault...');
+
+        try {
+            const isDoc = !!update.message.document;
+            const fileId = isDoc ? update.message.document.file_id : update.message.photo[update.message.photo.length - 1].file_id;
+            const fileName = isDoc ? update.message.document.file_name || `document_${Date.now()}` : `photo_${Date.now()}.jpg`;
+            const mimeType = isDoc ? update.message.document.mime_type || 'application/octet-stream' : 'image/jpeg';
+
+            const fileLink = await telegramService.getFileLink(fileId);
+            const response = await fetch(fileLink);
+            const arrayBuffer = await response.arrayBuffer();
+
+            const fileObj = {
+                name: fileName,
+                mimeType: mimeType,
+                buffer: Buffer.from(arrayBuffer)
+            };
+
+            // Pass to vaultAgent
+            const result = await vaultAgent.processDocument(fileObj, 'Telegram', null, userId);
+
+            if (!result) {
+                await telegramService.sendMessage(chatId, '⚠️ I analyzed the file, but it didn\'t seem like an important receipt, ticket, or official document to store.');
+            }
+        } catch (err) {
+            logger.error('Telegram', 'FileDownload', 'Failed to process attachment', err);
+            await telegramService.sendMessage(chatId, '❌ Failed to process the attachment. Please try again.');
+        }
+        return;
     }
 
     if (update.callback_query) {
