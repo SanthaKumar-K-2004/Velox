@@ -11,9 +11,19 @@ function escape(value) {
 }
 
 function getConnectUrl(userId) {
-    const baseUrl = process.env.RENDER_EXTERNAL_URL
-        ? `${process.env.RENDER_EXTERNAL_URL}/auth/google`
-        : env.googleRedirectUri.replace('/auth/google/callback', '/auth/google');
+    const externalUrl = process.env.PUBLIC_URL || process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL;
+    let baseUrl;
+
+    if (externalUrl) {
+        baseUrl = `${externalUrl.replace(/\/$/, '')}/auth/google`;
+    } else {
+        baseUrl = env.googleRedirectUri.replace('/auth/google/callback', '/auth/google');
+    }
+
+    // Warn if falling back to localhost in production
+    if (env.nodeEnv === 'production' && baseUrl.includes('localhost')) {
+        logger.warn('Telegram', 'ConnectLink', 'Warning: Generating a localhost link in production mode. Set PUBLIC_URL or BASE_URL in your environment variables.');
+    }
 
     return `${baseUrl}?userId=${userId}`;
 }
