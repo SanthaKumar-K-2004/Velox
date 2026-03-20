@@ -35,6 +35,14 @@ async function startServer() {
         // 3. Initialize background jobs
         scheduler.start();
 
+        // 4. Set Telegram Webhook in production
+        if (env.nodeEnv === 'production') {
+            const baseUrl = env.googleRedirectUri.replace('/auth/google/callback', '');
+            import('./services/telegram.js').then(({ telegramService }) => {
+                telegramService.setWebhook(baseUrl);
+            });
+        }
+
     } catch (err) {
         logger.error('Velox', 'Startup', 'Fatal startup error', err);
         process.exit(1);
