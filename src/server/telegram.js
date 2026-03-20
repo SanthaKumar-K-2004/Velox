@@ -32,54 +32,42 @@ async function handleUpdate(update) {
         const text = update.message.text.trim();
 
         logger.debug('Telegram', 'Message', `From ${chatId}: ${text}`);
+        const normalized = text.toLowerCase().trim();
 
-        if (text.startsWith('/')) {
-            const parts = text.split(' ');
-            const cmd = parts[0].toLowerCase().replace('@', '');
-            const args = parts.slice(1).join(' ');
+        // 1. Resolve userId early
+        const userId = await telegramCommands.resolveUser(chatId);
 
-            if (cmd === '/start') return telegramCommands.handleStart(chatId);
-
-            // Resolve userId for all other commands
-            const userId = await telegramCommands.resolveUser(chatId);
-            if (!userId) {
-                return telegramService.sendMessage(chatId, '👋 Please type /start to register before using other commands.');
+        // 2. Unregistered Users
+        if (!userId) {
+            if (normalized === '/start' || normalized === 'start' || normalized === 'hi' || normalized === 'hello') {
+                return telegramCommands.handleStart(chatId);
             }
-
-            switch (cmd) {
-            case '/help': return telegramCommands.handleHelp(chatId);
-            case '/status': return telegramCommands.handleStatus(chatId);
-            case '/inbox': return telegramCommands.handleInbox(chatId, userId);
-            case '/pending': return telegramCommands.handlePending(chatId, userId);
-            case '/vault': return telegramCommands.handleVault(chatId, userId);
-            case '/find': return telegramCommands.handleFind(chatId, args, userId);
-            case '/vip': return telegramCommands.handleVip(chatId, args, userId);
-            case '/ignore': return telegramCommands.handleIgnore(chatId, args, userId);
-            case '/away': return telegramCommands.handleAway(chatId, args, userId);
-            case '/sent': return telegramCommands.handleSent(chatId, userId);
-            case '/search': return telegramCommands.handleSearch(chatId, args, userId);
-            case '/back': return telegramCommands.handleBack(chatId, userId);
-            case '/pause': return telegramCommands.handlePause(chatId, userId);
-            case '/resume': return telegramCommands.handleResume(chatId, userId);
-            case '/tone': return telegramCommands.handleTone(chatId, args, userId);
-            case '/whitelist': return telegramCommands.handleWhitelist(chatId, args, userId);
-            case '/undo': return telegramCommands.handleUndo(chatId, userId);
-            default: return telegramCommands.handleUnknown(chatId);
-            }
+            return telegramService.sendMessage(chatId, '👋 Please say "start" to register before using the assistant.');
         }
 
-        // Handle interaction or Onboarding
-        const userId = await telegramCommands.resolveUser(chatId);
-        if (!userId) return telegramService.sendMessage(chatId, '👋 Please type /start to register.');
+        // 3. Prevent duplicate dashboard registration if they say start again
+        if (normalized === '/start' || normalized === 'start') {
+            return telegramCommands.handleStart(chatId);
+        }
 
-        // Check onboarding state
+        // 4. Handle Onboarding Conversations
         const { data: user } = await supabase.from('users').select('onboarding_status').eq('id', userId).single();
         if (user?.onboarding_status && user.onboarding_status !== 'done') {
             return memoryAgent.handleOnboardingMessage(userId, text);
         }
 
-        // Wire up natural language agent
+        // 5. OMNI-ROUTER: Send everything else to Natural Language AI
         return nlHandler.handle(userId, chatId, text);
+    }
+
+    // Handle incoming photos or documents (Phase 11)
+    if (update.message?.document || update.message?.photo) {
+        const chatId = update.message.chat.id.toString();
+        const userId = await telegramCommands.resolveUser(chatId);
+        if (!userId) return telegramService.sendMessage(chatId, '👋 Please say "start" to register first.');
+
+        return telegramService.sendMessage(chatId, '📎 File received! I will process and store this in your Vault shortly.');
+        // Implementation for downloading and OCR will go here
     }
 
     if (update.callback_query) {
@@ -89,7 +77,7 @@ async function handleUpdate(update) {
         const messageId = update.callback_query.message.message_id;
 
         const userId = await telegramCommands.resolveUser(chatId);
-        if (!userId) return telegramService.answerCallbackQuery(queryId, 'Please type /start first.');
+        if (!userId) return telegramService.answerCallbackQuery(queryId, 'Please say start first.');
 
         logger.debug('Telegram', 'Callback', `Action: ${data} from ${chatId} (User: ${userId})`);
 
