@@ -27,6 +27,16 @@ app.use('/webhook/telegram', webhookLimiter, telegramRoutes);
 app.use('/auth/google', oauthRoutes);
 app.use('/health', healthRoutes);
 
+// Root redirect to avoid 404 errors
+app.get('/', (req, res) => {
+    res.json({
+        message: 'Velox AI Email Agent is active!',
+        status: 'online',
+        health_check: '/health',
+        documentation: 'https://github.com/SanthaKumar-K-2004/Velox'
+    });
+});
+
 // Global Error Handler
 import { errorHandler } from '../middleware/errorHandler.js';
 app.use(errorHandler);
