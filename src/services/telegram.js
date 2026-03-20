@@ -6,13 +6,27 @@ import { logger } from '../utils/logger.js';
  * Velox — Telegram Bot Service
  * Wrapper around node-telegram-bot-api for sending messages,
  * inline keyboards, and handling callback queries.
+ *
+ * In development: uses long-polling so the bot works on localhost.
+ * In production:  uses webhooks set via setWebhook().
  */
+
+const isDev = env.nodeEnv !== 'production'
+    && !env.googleRedirectUri.includes('onrender.com');
 
 let bot = null;
 
 function getBot() {
     if (!bot) {
-        bot = new TelegramBot(env.telegramBotToken);
+        if (isDev) {
+            // Polling mode for local development
+            bot = new TelegramBot(env.telegramBotToken, { polling: true });
+            logger.info('Telegram', 'Init', 'Bot started in POLLING mode (development)');
+        } else {
+            // Webhook mode for production — no polling
+            bot = new TelegramBot(env.telegramBotToken);
+            logger.info('Telegram', 'Init', 'Bot created in WEBHOOK mode (production)');
+        }
     }
     return bot;
 }
@@ -21,6 +35,13 @@ export const telegramService = {
 
     escapeMarkdown(text = '') {
         return String(text).replace(/([_*[\]()`\\])/g, '\\$1');
+    },
+
+    /**
+     * Returns true when the bot is using long-polling (local dev).
+     */
+    isPolling() {
+        return isDev;
     },
 
     /**

@@ -19,7 +19,7 @@ function getConnectUrl(userId) {
 }
 
 /**
- * Velox â€” Telegram Command Handlers
+ * Velox — Telegram Command Handlers (Enterprise Edition)
  */
 export const telegramCommands = {
 
@@ -27,7 +27,7 @@ export const telegramCommands = {
         try {
             let { data: user } = await supabase
                 .from('users')
-                .select('id')
+                .select('id, onboarding_status')
                 .eq('telegram_chat_id', chatId.toString())
                 .single();
 
@@ -43,17 +43,21 @@ export const telegramCommands = {
                 logger.info('Telegram', 'NewUser', `Registered user ${user.id} for chat ${chatId}`);
             }
 
-            const text =
-                `*Welcome to Velox v${VELOX.VERSION}*\n\n` +
-                'Connect Gmail to start monitoring email and drafting replies.\n\n' +
-                `Setup link:\n${getConnectUrl(user.id)}\n\n` +
-                'Reuse the same link any time to connect another Gmail account.\n' +
-                'Type /help to see all commands.';
+            const connectUrl = getConnectUrl(user.id);
 
-            await telegramService.sendMessage(chatId, text);
+            const text =
+                '👋 *Welcome to Velox*\n\n' +
+                'Your AI Email Copilot is ready. Connect your Gmail to get started.\n\n' +
+                'Once connected, I\'ll analyze your writing style and we can finish the setup.';
+
+            // Use inline URL button — always clickable, enterprise-grade UX
+            await telegramService.sendWithButtons(chatId, text, [
+                [{ text: '🔗 Connect Gmail', url: connectUrl }],
+                [{ text: '📖 View Commands', callback_data: 'show_help' }],
+            ]);
         } catch (err) {
             logger.error('Telegram', 'StartFail', 'Failed to handle /start', err);
-            await telegramService.sendMessage(chatId, 'Registration failed. Please try again later.');
+            await telegramService.sendMessage(chatId, '⚠️ Registration failed. Please try again later.');
         }
     },
 
@@ -71,17 +75,25 @@ export const telegramCommands = {
 
     async handleHelp(chatId) {
         const text =
-            '*Velox Commands*\n\n' +
-            '/inbox - Emails that still need attention\n' +
-            '/pending - Drafts queued for review or delayed send\n' +
-            '/vault - Recent stored documents\n' +
-            '/find [text] - Search stored documents\n' +
-            '/search [text] - Search sent email history\n' +
-            '/status - System health\n' +
-            '/away [hours] - Enable away mode\n' +
-            '/vip add [email] - Mark a contact as VIP\n' +
-            '/ignore add [email] - Silence a sender\n' +
-            '/tone [formal|casual|friendly|direct] - Update style guidance';
+            '⚡ *Velox Command Center*\n\n' +
+            '━━━━━━━━━━━━━━━━━━━━\n' +
+            '📬  /inbox — Emails needing attention\n' +
+            '📝  /pending — Drafts queued for review\n' +
+            '🗄  /vault — Recent stored documents\n' +
+            '🔍  /find \\[text] — Search stored docs\n' +
+            '🔎  /search \\[text] — Search sent emails\n' +
+            '📊  /status — System health dashboard\n' +
+            '━━━━━━━━━━━━━━━━━━━━\n' +
+            '✈️  /away \\[hours] — Enable away mode\n' +
+            '▶️  /resume — Resume auto-sends\n' +
+            '⏸  /pause — Pause auto-sends\n' +
+            '↩️  /undo — Recall last sent email\n' +
+            '━━━━━━━━━━━━━━━━━━━━\n' +
+            '⭐  /vip add \\[email] — Mark VIP contact\n' +
+            '🚫  /ignore add \\[email] — Silence sender\n' +
+            '🎨  /tone \\[style] — Update writing style\n' +
+            '━━━━━━━━━━━━━━━━━━━━\n\n' +
+            '_Tip: You can also type naturally — I\'ll understand._';
 
         await telegramService.sendMessage(chatId, text);
     },
@@ -91,7 +103,7 @@ export const telegramCommands = {
             const userId = await this.resolveUser(chatId);
             if (!userId) {
                 if (dataOnly) return { error: 'user_not_registered' };
-                return telegramService.sendMessage(chatId, 'Please type /start to register first.');
+                return telegramService.sendMessage(chatId, '⚠️ Please type /start to register first.');
             }
 
             const uptimeMs = process.uptime() * 1000;
@@ -120,27 +132,37 @@ export const telegramCommands = {
                 .eq('user_id', userId);
 
             const totalSizeKB = vaultDocs?.reduce((sum, doc) => sum + (doc.size_kb || 0), 0) || 0;
+            const apiUsed = apiCalls || 0;
+            const apiLimit = 1500;
+            const apiPct = Math.round((apiUsed / apiLimit) * 100);
+            const statusEmoji = apiUsed > 1400 ? '🟡' : '🟢';
+
             const statusData = {
-                status: apiCalls > 1400 ? 'Near Limit' : 'Optimal',
+                status: apiUsed > 1400 ? 'Near Limit' : 'Optimal',
                 uptime: `${uptimeHrs}h ${uptimeMins % 60}m`,
                 emails_today: emailCount || 0,
-                api_usage: `${apiCalls || 0}/1500`,
+                api_usage: `${apiUsed}/${apiLimit}`,
                 vault_size_mb: (totalSizeKB / 1024).toFixed(2),
                 version: VELOX.VERSION
             };
 
             if (dataOnly) return statusData;
 
-            const text =
-                '*Your Velox Status*\n\n' +
-                `Status: *${escape(statusData.status)}*\n` +
-                `Uptime: ${escape(statusData.uptime)}\n` +
-                `Emails today: ${escape(statusData.emails_today)}\n` +
-                `API usage: ${escape(statusData.api_usage)}\n` +
-                `Vault: ${escape(statusData.vault_size_mb)} MB\n\n` +
-                `_v${escape(statusData.version)}_`;
+            const progressBar = buildProgressBar(apiPct);
 
-            await telegramService.sendMessage(chatId, text);
+            const text =
+                '📊 *System Health Dashboard*\n\n' +
+                `${statusEmoji} Status: *${escape(statusData.status)}*\n` +
+                `⏱ Uptime: ${escape(statusData.uptime)}\n` +
+                `📧 Emails today: *${statusData.emails_today}*\n` +
+                `🤖 API usage: ${escape(statusData.api_usage)} (${apiPct}%)\n` +
+                `${progressBar}\n` +
+                `🗄 Vault: ${escape(statusData.vault_size_mb)} MB\n\n` +
+                `_Velox v${escape(statusData.version)}_`;
+
+            await telegramService.sendWithButtons(chatId, text, [
+                [{ text: '🔄 Refresh', callback_data: 'refresh_status' }],
+            ]);
         } catch (err) {
             logger.error('Telegram', 'StatusFail', 'Failed to handle /status', err);
             if (dataOnly) throw err;
@@ -159,16 +181,25 @@ export const telegramCommands = {
         if (dataOnly) return { emails: pending || [] };
 
         if (!pending || pending.length === 0) {
-            await telegramService.sendMessage(chatId, '*Inbox clear.* No emails need your attention right now.');
+            const text =
+                '✅ *Inbox Clear*\n\n' +
+                '_No emails need your attention right now. I\'ll notify you when something arrives._';
+            await telegramService.sendWithButtons(chatId, text, [
+                [{ text: '🔄 Refresh Inbox', callback_data: 'view_inbox' }],
+            ]);
             return;
         }
 
-        let text = `*${pending.length} email(s) need attention*\n\n`;
+        let text = `📬 *${pending.length} Email${pending.length > 1 ? 's' : ''} Need Attention*\n\n`;
         pending.forEach((email, index) => {
-            text += `${index + 1}. [${escape(email.user_email || 'General')}] \`${escape(email.message_id)}\` - _${escape(email.status)}_\n`;
+            const account = email.user_email ? email.user_email.split('@')[0] : 'General';
+            text += `${numberEmoji(index + 1)} \\[${escape(account)}] \`${escape(email.message_id?.substring(0, 12))}…\` — _${escape(email.status)}_\n`;
         });
+        text += '\n_Tap an email notification to take action._';
 
-        await telegramService.sendMessage(chatId, text);
+        await telegramService.sendWithButtons(chatId, text, [
+            [{ text: '🔄 Refresh', callback_data: 'view_inbox' }],
+        ]);
     },
 
     async handlePending(chatId, userId, dataOnly = false) {
@@ -183,17 +214,27 @@ export const telegramCommands = {
         if (dataOnly) return { drafts: drafts || [] };
 
         if (!drafts || drafts.length === 0) {
-            await telegramService.sendMessage(chatId, '*No pending drafts.*');
+            const text =
+                '✅ *No Pending Drafts*\n\n' +
+                '_Your outbox is empty. All drafts have been sent or dismissed._';
+            await telegramService.sendMessage(chatId, text);
             return;
         }
 
-        let text = `*${drafts.length} draft(s) pending*\n\n`;
+        let text = `📝 *${drafts.length} Draft${drafts.length > 1 ? 's' : ''} Pending Review*\n\n`;
         drafts.forEach((draft, index) => {
-            text += `${index + 1}. [${escape(draft.user_email || 'General')}] *To:* ${escape(draft.email_to)}\n`;
-            text += `_${escape(draft.subject || 'No subject')}_\n\n`;
+            const account = draft.user_email ? draft.user_email.split('@')[0] : 'General';
+            text += `${numberEmoji(index + 1)} \\[${escape(account)}]\n`;
+            text += `    → *To:* ${escape(draft.email_to)}\n`;
+            text += `    _${escape(draft.subject || 'No subject')}_\n\n`;
         });
 
-        await telegramService.sendMessage(chatId, text);
+        await telegramService.sendWithButtons(chatId, text, [
+            [
+                { text: '✅ Send All', callback_data: 'send_all_pending' },
+                { text: '🔄 Refresh', callback_data: 'handle_routine' },
+            ],
+        ]);
     },
 
     async handleVault(chatId, userId, dataOnly = false) {
@@ -207,14 +248,17 @@ export const telegramCommands = {
         if (dataOnly) return { documents: docs || [] };
 
         if (!docs || docs.length === 0) {
-            await telegramService.sendMessage(chatId, '*Vault is empty.*');
+            const text =
+                '🗄 *Vault is Empty*\n\n' +
+                '_Send me a document or image and I\'ll analyze and store it for you._';
+            await telegramService.sendMessage(chatId, text);
             return;
         }
 
-        let text = '*Recent Documents*\n\n';
+        let text = '🗄 *Recent Documents*\n\n';
         docs.forEach((doc) => {
-            text += `• ${escape(doc.vendor || 'Unknown')} - ${escape(doc.doc_type || 'document')}\n`;
-            text += `_${escape(doc.summary || 'No summary available')}_\n\n`;
+            text += `📄 *${escape(doc.vendor || 'Unknown')}* — ${escape(doc.doc_type || 'document')}\n`;
+            text += `    _${escape(doc.summary || 'No summary available')}_\n\n`;
         });
 
         await telegramService.sendMessage(chatId, text);
@@ -222,36 +266,36 @@ export const telegramCommands = {
 
     async handleFind(chatId, query, userId) {
         if (!query) {
-            return telegramService.sendMessage(chatId, 'Type `/find [what you are looking for]`');
+            return telegramService.sendMessage(chatId, '🔍 Type `/find [what you are looking for]`');
         }
 
-        await telegramService.sendMessage(chatId, `Searching vault for _${escape(query)}_...`);
+        await telegramService.sendMessage(chatId, `🔍 Searching vault for _${escape(query)}_...`);
         const docs = await vaultAgent.findDocument(userId, query);
 
         if (!docs || docs.length === 0) {
-            return telegramService.sendMessage(chatId, `No documents matched _${escape(query)}_.`);
+            return telegramService.sendMessage(chatId, `❌ No documents matched _${escape(query)}_.`);
         }
 
-        let text = '*Search Results*\n\n';
+        let text = `🔍 *Search Results for "${escape(query)}"*\n\n`;
         docs.forEach((doc) => {
-            text += `• ${escape(doc.vendor || 'Unknown')} - ${escape(doc.doc_type || 'document')}\n`;
-            text += `_${escape(doc.summary || 'No summary available')}_\n\n`;
+            text += `📄 *${escape(doc.vendor || 'Unknown')}* — ${escape(doc.doc_type || 'document')}\n`;
+            text += `    _${escape(doc.summary || 'No summary available')}_\n\n`;
         });
         await telegramService.sendMessage(chatId, text);
     },
 
     async handleVip(chatId, params, userId) {
         const [, email] = params.split(' ');
-        if (!email) return telegramService.sendMessage(chatId, 'Type `/vip add person@email.com`');
+        if (!email) return telegramService.sendMessage(chatId, '⭐ Type `/vip add person@email.com`');
         await memoryAgent.updateContactMemory(userId, email, { is_vip: true });
-        await telegramService.sendMessage(chatId, `*${escape(email)}* added to VIP list.`);
+        await telegramService.sendMessage(chatId, `⭐ *${escape(email)}* added to VIP list.\n_Emails from this contact will be prioritized._`);
     },
 
     async handleIgnore(chatId, params, userId) {
         const [, email] = params.split(' ');
-        if (!email) return telegramService.sendMessage(chatId, 'Type `/ignore add person@email.com`');
+        if (!email) return telegramService.sendMessage(chatId, '🚫 Type `/ignore add person@email.com`');
         await memoryAgent.updateContactMemory(userId, email, { is_ignored: true });
-        await telegramService.sendMessage(chatId, `*${escape(email)}* added to Ignore list.`);
+        await telegramService.sendMessage(chatId, `🚫 *${escape(email)}* added to Ignore list.\n_Emails from this sender will be auto-dismissed._`);
     },
 
     async handleAway(chatId, hours, userId) {
@@ -265,11 +309,20 @@ export const telegramCommands = {
             status: 'away',
             away_until: until.toISOString()
         });
-        await telegramService.sendMessage(chatId, `Away mode enabled for *${escape(durationHours)}* hour(s).`);
+        await telegramService.sendMessage(
+            chatId,
+            '✈️ *Away Mode Enabled*\n\n' +
+            `Duration: *${durationHours}* hour(s)\n` +
+            `Returns: _${escape(until.toLocaleString())}_\n\n` +
+            '_I\'ll hold your drafts and send holding replies to urgent emails._'
+        );
     },
 
     async handleUnknown(chatId) {
-        await telegramService.sendMessage(chatId, 'I did not understand that. Type /help to see available commands.');
+        await telegramService.sendWithButtons(chatId,
+            '🤔 I didn\'t understand that command.\n\n_Try typing naturally or tap below for help._',
+            [[{ text: '📖 View Commands', callback_data: 'show_help' }]]
+        );
     },
 
     async handleSent(chatId, userId) {
@@ -283,64 +336,89 @@ export const telegramCommands = {
             .order('sent_at', { ascending: true });
 
         if (!emails || emails.length === 0) {
-            return telegramService.sendMessage(chatId, 'No emails sent today via the assistant.');
+            return telegramService.sendMessage(chatId, '📤 *No Emails Sent Today*\n\n_Nothing has been sent via the assistant yet today._');
         }
 
-        let text = '*Sent Today*\n\n';
-        emails.forEach((email) => {
-            text += `• [${escape(email.user_email || 'General')}] *To:* ${escape(email.recipient || 'Unknown')}\n`;
-            text += `_${escape(email.subject || 'No subject')}_\n\n`;
+        let text = `📤 *Sent Today — ${emails.length} email${emails.length > 1 ? 's' : ''}*\n\n`;
+        emails.forEach((email, index) => {
+            const account = email.user_email ? email.user_email.split('@')[0] : 'General';
+            text += `${numberEmoji(index + 1)} \\[${escape(account)}]\n`;
+            text += `    → *To:* ${escape(email.recipient || 'Unknown')}\n`;
+            text += `    _${escape(email.subject || 'No subject')}_\n\n`;
         });
 
         await telegramService.sendMessage(chatId, text);
     },
 
     async handleSearch(chatId, query, userId) {
-        if (!query) return telegramService.sendMessage(chatId, 'Type `/search [person or topic]`');
+        if (!query) return telegramService.sendMessage(chatId, '🔎 Type `/search [person or topic]`');
         const { nlHandler } = await import('../agents/nlHandler.js');
         await nlHandler.handleEmailSearch(userId, chatId, { query });
     },
 
     async handleBack(chatId, userId) {
         await supabase.from('user_status').upsert({ user_id: userId, status: 'active', away_until: null });
-        await telegramService.sendMessage(chatId, '*Away mode disabled.*');
+        await telegramService.sendMessage(chatId, '▶️ *Away Mode Disabled*\n\n_Welcome back! I\'m resuming normal operations._');
     },
 
     async handlePause(chatId, userId) {
         await supabase.from('user_status').upsert({ user_id: userId, status: 'paused' });
-        await telegramService.sendMessage(chatId, '*Auto-sends paused.* I will keep drafting but will not send automatically.');
+        await telegramService.sendMessage(
+            chatId,
+            '⏸ *Auto-Sends Paused*\n\n' +
+            '_I\'ll keep drafting replies, but nothing will be sent automatically until you resume._'
+        );
     },
 
     async handleResume(chatId, userId) {
         await supabase.from('user_status').upsert({ user_id: userId, status: 'active' });
-        await telegramService.sendMessage(chatId, '*Auto-sends resumed.*');
+        await telegramService.sendMessage(chatId, '▶️ *Auto-Sends Resumed*\n\n_I\'m back to full autonomous mode._');
     },
 
     async handleTone(chatId, tone, userId) {
         if (!['formal', 'casual', 'friendly', 'direct'].includes(tone)) {
-            return telegramService.sendMessage(chatId, 'Type `/tone [formal|casual|friendly|direct]`');
+            return telegramService.sendWithButtons(chatId,
+                '🎨 *Select Your Writing Style*\n\n_Choose the tone I should use when drafting emails:_',
+                [
+                    [
+                        { text: '🎩 Formal', callback_data: 'set_tone_formal' },
+                        { text: '😊 Casual', callback_data: 'set_tone_casual' },
+                    ],
+                    [
+                        { text: '🤝 Friendly', callback_data: 'set_tone_friendly' },
+                        { text: '🎯 Direct', callback_data: 'set_tone_direct' },
+                    ],
+                ]
+            );
         }
 
+        const toneEmoji = { formal: '🎩', casual: '😊', friendly: '🤝', direct: '🎯' };
         await supabase.from('memory').upsert({ user_id: userId, tone_style: tone });
-        await telegramService.sendMessage(chatId, `Tone updated to *${escape(tone)}*.`);
+        await telegramService.sendMessage(
+            chatId,
+            `${toneEmoji[tone] || '🎨'} *Tone Updated to ${escape(tone.charAt(0).toUpperCase() + tone.slice(1))}*\n\n` +
+            '_All future drafts will reflect this style._'
+        );
     },
 
     async handleWhitelist(chatId, args, userId) {
         const [action, domain] = args.split(' ');
         if (!['add', 'remove', 'list'].includes(action)) {
-            return telegramService.sendMessage(chatId, 'Type `/whitelist [add|remove|list] [domain]`');
+            return telegramService.sendMessage(chatId, '🛡 Type `/whitelist [add|remove|list] [domain]`');
         }
 
         const mem = await memoryAgent.getMemoryContext(userId);
         let whitelist = mem.whitelist || [];
 
         if (action === 'list') {
-            const listText = whitelist.length > 0 ? whitelist.map((item) => `• ${escape(item)}`).join('\n') : 'No whitelisted domains.';
-            return telegramService.sendMessage(chatId, `*Whitelisted Domains*\n\n${listText}`);
+            const listText = whitelist.length > 0
+                ? whitelist.map((item) => `  ✅ ${escape(item)}`).join('\n')
+                : '_No whitelisted domains yet._';
+            return telegramService.sendMessage(chatId, `🛡 *Whitelisted Domains*\n\n${listText}`);
         }
 
         if (!domain || !domain.startsWith('@')) {
-            return telegramService.sendMessage(chatId, 'Specify a domain starting with @, for example `@example.com`.');
+            return telegramService.sendMessage(chatId, '⚠️ Specify a domain starting with @, for example `@example.com`.');
         }
 
         if (action === 'add') {
@@ -350,12 +428,13 @@ export const telegramCommands = {
         }
 
         await supabase.from('memory').upsert({ user_id: userId, whitelist });
-        await telegramService.sendMessage(chatId, `Domain *${escape(domain)}* ${escape(action)}ed.`);
+        const verb = action === 'add' ? 'added to' : 'removed from';
+        await telegramService.sendMessage(chatId, `🛡 *${escape(domain)}* ${verb} whitelist.`);
     },
 
     async handleUndo(chatId, userId) {
         const { sendAgent } = await import('../agents/send.js');
-        await telegramService.sendMessage(chatId, 'Trying to recall the last sent email...');
+        await telegramService.sendMessage(chatId, '↩️ Attempting to recall the last sent email...');
 
         const { data: lastEmail } = await supabase.from('email_history')
             .select('message_id, user_email')
@@ -365,14 +444,27 @@ export const telegramCommands = {
             .single();
 
         if (!lastEmail) {
-            return telegramService.sendMessage(chatId, 'No recent emails found to undo.');
+            return telegramService.sendMessage(chatId, '❌ No recent emails found to undo.');
         }
 
         const result = await sendAgent.undoSend(userId, lastEmail.message_id, lastEmail.user_email);
         if (result.success) {
-            await telegramService.sendMessage(chatId, 'Email moved to trash within Gmail\'s undo window.');
+            await telegramService.sendMessage(chatId, '✅ *Email Recalled*\n\n_The email was moved to trash within Gmail\'s undo window._');
         } else {
-            await telegramService.sendMessage(chatId, `Undo failed: ${escape(result.message)}.`);
+            await telegramService.sendMessage(chatId, `❌ *Undo Failed*\n\n_${escape(result.message)}_`);
         }
     },
 };
+
+// ─── Helpers ────────────────────────────────────────
+
+function numberEmoji(n) {
+    const emojis = ['0️⃣', '1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+    return emojis[n] || `${n}.`;
+}
+
+function buildProgressBar(pct) {
+    const filled = Math.round(pct / 10);
+    const empty = 10 - filled;
+    return '`[' + '█'.repeat(filled) + '░'.repeat(empty) + ']`';
+}

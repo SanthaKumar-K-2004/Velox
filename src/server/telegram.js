@@ -16,6 +16,9 @@ import { helpers } from '../utils/helpers.js';
 const router = express.Router();
 const editSessions = new Map();
 
+// Ignore messages older than 30 seconds to prevent replaying backlogs on restart.
+const STALE_MESSAGE_SECONDS = 30;
+
 const DIRECT_CALLBACKS = new Set([
     'send_all_pending',
     'dismiss_all_pending',
@@ -23,6 +26,8 @@ const DIRECT_CALLBACKS = new Set([
     'handle_routine',
     'update_tone',
     'keep_tone',
+    'show_help',
+    'refresh_status',
 ]);
 
 const MESSAGE_CALLBACK_PREFIXES = [
@@ -156,6 +161,16 @@ router.post(`/${env.telegramBotToken}`, async (req, res, next) => {
 });
 
 async function handleUpdate(update) {
+    // ── Stale message guard ──────────────────────────────────
+    const msgDate = update.message?.date || update.callback_query?.message?.date;
+    if (msgDate) {
+        const ageSeconds = Math.floor(Date.now() / 1000) - msgDate;
+        if (ageSeconds > STALE_MESSAGE_SECONDS) {
+            logger.debug('Telegram', 'Stale', `Skipping stale update (${ageSeconds}s old)`);
+            return;
+        }
+    }
+
     if (update.message?.text) {
         const chatId = update.message.chat.id.toString();
         const text = update.message.text.trim();
@@ -169,7 +184,7 @@ async function handleUpdate(update) {
             if (normalized === '/start' || normalized === 'start' || normalized === 'hi' || normalized === 'hello') {
                 return telegramCommands.handleStart(chatId);
             }
-            return telegramService.sendMessage(chatId, 'Please say "start" to register before using the assistant.');
+            return telegramService.sendMessage(chatId, '👋 Please say "start" to register before using the assistant\.');
         }
 
         if (normalized === '/start' || normalized === 'start') {
@@ -180,7 +195,7 @@ async function handleUpdate(update) {
         if (pendingEdit) {
             if (normalized === '/cancel') {
                 editSessions.delete(chatId);
-                return telegramService.sendMessage(chatId, 'Edit cancelled.');
+                return telegramService.sendMessage(chatId, '❌ Edit cancelled\.');
             }
 
             editSessions.delete(chatId);
@@ -203,9 +218,9 @@ async function handleUpdate(update) {
     if (update.message?.document || update.message?.photo) {
         const chatId = update.message.chat.id.toString();
         const userId = await telegramCommands.resolveUser(chatId);
-        if (!userId) return telegramService.sendMessage(chatId, 'Please say "start" to register first.');
+        if (!userId) return telegramService.sendMessage(chatId, '👋 Please say "start" to register first\.');
 
-        await telegramService.sendMessage(chatId, 'File received. Analyzing and storing it now...');
+        await telegramService.sendMessage(chatId, '📎 File received\. Analyzing and storing it now\.\.\.');
 
         try {
             const isDocument = Boolean(update.message.document);
@@ -232,11 +247,11 @@ async function handleUpdate(update) {
             const result = await vaultAgent.processDocument(fileObj, 'Telegram', null, userId);
 
             if (!result) {
-                await telegramService.sendMessage(chatId, 'The file was analyzed, but it did not look like a document worth storing.');
+                await telegramService.sendMessage(chatId, 'ℹ️ The file was analyzed, but it didn\'t look like a document worth storing\.');
             }
         } catch (err) {
             logger.error('Telegram', 'FileDownload', 'Failed to process attachment', err);
-            await telegramService.sendMessage(chatId, 'Attachment processing failed. Please try again.');
+            await telegramService.sendMessage(chatId, '⚠️ Attachment processing failed\. Please try again\.');
         }
         return;
     }
@@ -249,7 +264,7 @@ async function handleUpdate(update) {
 
         const userId = await telegramCommands.resolveUser(chatId);
         if (!userId) {
-            return telegramService.answerCallbackQuery(queryId, 'Please say start first.');
+            return telegramService.answerCallbackQuery(queryId, 'Please say /start first.');
         }
 
         const callback = parseCallbackData(data);
@@ -262,192 +277,211 @@ async function handleUpdate(update) {
 async function handleCallbackQuery(queryId, chatId, telegramMsgId, callback, userId) {
     try {
         switch (callback.action) {
-        case 'send': {
-            await telegramService.answerCallbackQuery(queryId, 'Sending...');
-            const { data: history } = await supabase
-                .from('email_history')
-                .select('*')
-                .eq('user_id', userId)
-                .eq('message_id', callback.messageId)
-                .maybeSingle();
+            case 'send': {
+                await telegramService.answerCallbackQuery(queryId, 'Sending...');
+                const { data: history } = await supabase
+                    .from('email_history')
+                    .select('*')
+                    .eq('user_id', userId)
+                    .eq('message_id', callback.messageId)
+                    .maybeSingle();
 
-            if (!history?.ai_draft) {
-                await telegramService.sendMessage(chatId, 'No draft is stored for that email yet.');
-                return;
-            }
-
-            await sendAgent.sendEmail(userId, {
-                email_to: history.recipient,
-                subject: history.subject,
-                body: history.ai_draft,
-                thread_id: history.thread_id,
-            }, 0, callback.userEmail || history.user_email);
-
-            await telegramService.editMessage(chatId, telegramMsgId, `✅ Email sent to ${escape(history.recipient)}`);
-            break;
-        }
-
-        case 'read':
-            await telegramService.answerCallbackQuery(queryId, 'Marked as read');
-            await gmailService.markAsRead(userId, callback.messageId, callback.userEmail);
-            await telegramService.editMessage(chatId, telegramMsgId, 'Email marked as read in Gmail.');
-            break;
-
-        case 'trash':
-            await telegramService.answerCallbackQuery(queryId, 'Moved to trash');
-            await gmailService.trashMessage(userId, callback.messageId, callback.userEmail);
-            await telegramService.editMessage(chatId, telegramMsgId, 'Email moved to trash.');
-            break;
-
-        case 'ai_reply': {
-            await telegramService.answerCallbackQuery(queryId, 'Drafting reply...');
-            const detail = await gmailService.getMessage(userId, callback.messageId, callback.userEmail);
-            const emailData = {
-                messageId: detail.id,
-                threadId: detail.threadId,
-                subject: detail.subject,
-                from: detail.from,
-                fromName: detail.fromName,
-                snippet: detail.snippet,
-                body: detail.body,
-                timestamp: detail.timestamp,
-                hasAttachment: detail.hasAttachment,
-            };
-
-            const context = await contextBuilderAgent.buildContext(userId, emailData, callback.userEmail);
-            const aiResult = await aiBrainAgent.process(userId, context);
-            const draftBody = aiResult.draft_reply || aiResult.holding_reply;
-
-            if (!draftBody) {
-                await telegramService.sendMessage(chatId, 'I could not produce a safe draft for that email. Please review it manually.');
-                return;
-            }
-
-            const record = await upsertDraftRecord(userId, callback.messageId, callback.userEmail, draftBody);
-            await supabase.from('email_history')
-                .update({
-                    ai_draft: draftBody,
-                    confidence: aiResult.confidence,
-                    autonomy_level: aiResult.autonomy_level,
-                })
-                .eq('user_id', userId)
-                .eq('message_id', callback.messageId);
-
-            const preview =
-                    '*Draft Ready*\n' +
-                    `To: *${escape(record.recipient)}*\n` +
-                    `Subject: ${escape(record.subject)}\n\n` +
-                    `_${escape(draftBody)}_\n\n` +
-                    `Confidence: ${escape(aiResult.confidence)}%`;
-
-            await telegramService.sendWithButtons(chatId, preview, [[
-                { text: '✅ Send', callback_data: `send_${callback.messageId}_${callback.userEmail || ''}` },
-                { text: '✍️ Edit', callback_data: `edit_${callback.messageId}_${callback.userEmail || ''}` }
-            ]]);
-            break;
-        }
-
-        case 'edit': {
-            await telegramService.answerCallbackQuery(queryId, 'Reply with your revised draft');
-            await upsertDraftRecord(userId, callback.messageId, callback.userEmail, null);
-            editSessions.set(chatId, {
-                messageId: callback.messageId,
-                userEmail: callback.userEmail || '',
-                createdAt: Date.now(),
-            });
-            await telegramService.sendMessage(chatId, 'Send your revised email text as the next message. Send `/cancel` to stop editing.');
-            break;
-        }
-
-        case 'undo': {
-            await telegramService.answerCallbackQuery(queryId, 'Trying to undo...');
-            const result = await sendAgent.undoSend(userId, callback.messageId, callback.userEmail);
-            if (result.success) {
-                await telegramService.editMessage(chatId, telegramMsgId, 'Email moved to trash within Gmail\'s undo window.');
-            } else {
-                await telegramService.sendMessage(chatId, `Undo failed: ${escape(result.message)}`);
-            }
-            break;
-        }
-
-        case 'reject':
-            await telegramService.answerCallbackQuery(queryId, 'Draft dismissed');
-            await telegramService.editMessage(chatId, telegramMsgId, 'Draft dismissed. No email was sent.');
-            break;
-
-        case 'ignore':
-        case 'skip':
-        case 'later':
-            await telegramService.answerCallbackQuery(queryId, 'Acknowledged');
-            await telegramService.editMessage(chatId, telegramMsgId, `Acknowledged: ${escape(callback.action)}. No email was sent.`);
-            break;
-
-        case 'view_inbox':
-            await telegramService.answerCallbackQuery(queryId, 'Opening inbox');
-            await telegramCommands.handleInbox(chatId, userId);
-            break;
-
-        case 'handle_routine':
-            await telegramService.answerCallbackQuery(queryId, 'Opening pending drafts');
-            await telegramCommands.handlePending(chatId, userId);
-            break;
-
-        case 'send_all_pending': {
-            await telegramService.answerCallbackQuery(queryId, 'Sending queued drafts...');
-            const { data: drafts } = await supabase
-                .from('pending_sends')
-                .select('*')
-                .eq('user_id', userId)
-                .eq('status', 'pending')
-                .order('created_at', { ascending: true });
-
-            if (!drafts || drafts.length === 0) {
-                await telegramService.sendMessage(chatId, 'There are no pending drafts to send.');
-                return;
-            }
-
-            let sentCount = 0;
-            for (const draft of drafts) {
-                try {
-                    await sendAgent.sendEmail(userId, draft, 0, draft.user_email);
-                    await supabase.from('pending_sends')
-                        .update({ status: 'sent' })
-                        .eq('id', draft.id);
-                    sentCount++;
-                } catch (err) {
-                    logger.error('Telegram', 'SendAllPending', `Failed to send pending draft ${draft.id}`, err);
+                if (!history?.ai_draft) {
+                    await telegramService.sendMessage(chatId, '⚠️ No draft is stored for that email yet\.');
+                    return;
                 }
+
+                await sendAgent.sendEmail(userId, {
+                    email_to: history.recipient,
+                    subject: history.subject,
+                    body: history.ai_draft,
+                    thread_id: history.thread_id,
+                }, 0, callback.userEmail || history.user_email);
+
+                await telegramService.editMessage(chatId, telegramMsgId, `✅ *Email Sent*\nTo: ${escape(history.recipient)}`);
+                break;
             }
 
-            await telegramService.sendMessage(chatId, `Sent ${sentCount} pending draft(s).`);
-            break;
-        }
+            case 'read':
+                await telegramService.answerCallbackQuery(queryId, 'Marked as read');
+                await gmailService.markAsRead(userId, callback.messageId, callback.userEmail);
+                await telegramService.editMessage(chatId, telegramMsgId, '✅ Email marked as read in Gmail\.');
+                break;
 
-        case 'dismiss_all_pending':
-            await telegramService.answerCallbackQuery(queryId, 'Not supported');
-            await telegramService.sendMessage(chatId, 'Bulk dismiss is not enabled. Use /pending to review drafts individually.');
-            break;
+            case 'trash':
+                await telegramService.answerCallbackQuery(queryId, 'Moved to trash');
+                await gmailService.trashMessage(userId, callback.messageId, callback.userEmail);
+                await telegramService.editMessage(chatId, telegramMsgId, '🗑 Email moved to trash\.');
+                break;
 
-        case 'update_tone':
-            await telegramService.answerCallbackQuery(queryId, 'Tone review noted');
-            await telegramService.sendMessage(chatId, 'Use `/tone formal`, `/tone casual`, `/tone friendly`, or `/tone direct` to update your preferred style.');
-            break;
+            case 'ai_reply': {
+                await telegramService.answerCallbackQuery(queryId, 'Drafting reply…');
+                const detail = await gmailService.getMessage(userId, callback.messageId, callback.userEmail);
+                const emailData = {
+                    messageId: detail.id,
+                    threadId: detail.threadId,
+                    subject: detail.subject,
+                    from: detail.from,
+                    fromName: detail.fromName,
+                    snippet: detail.snippet,
+                    body: detail.body,
+                    timestamp: detail.timestamp,
+                    hasAttachment: detail.hasAttachment,
+                };
 
-        case 'keep_tone':
-            await telegramService.answerCallbackQuery(queryId, 'Keeping current tone');
-            await telegramService.sendMessage(chatId, 'Kept the current tone guidance.');
-            break;
+                const context = await contextBuilderAgent.buildContext(userId, emailData, callback.userEmail);
+                const aiResult = await aiBrainAgent.process(userId, context);
+                const draftBody = aiResult.draft_reply || aiResult.holding_reply;
 
-        case 'ai_draft':
-        case 'cancel_draft':
-        case 'followup':
-        case 'dismiss_fw':
-            await telegramService.answerCallbackQuery(queryId, 'Not implemented');
-            await telegramService.sendMessage(chatId, 'That workflow is not fully configured yet. No action was taken.');
-            break;
+                if (!draftBody) {
+                    await telegramService.sendMessage(chatId, '⚠️ I could not produce a safe draft for that email\. Please review it manually\.');
+                    return;
+                }
 
-        default:
-            await telegramService.answerCallbackQuery(queryId);
+                const record = await upsertDraftRecord(userId, callback.messageId, callback.userEmail, draftBody);
+                await supabase.from('email_history')
+                    .update({
+                        ai_draft: draftBody,
+                        confidence: aiResult.confidence,
+                        autonomy_level: aiResult.autonomy_level,
+                    })
+                    .eq('user_id', userId)
+                    .eq('message_id', callback.messageId);
+
+                const confPct = aiResult.confidence || 0;
+                const confEmoji = confPct >= 80 ? '🟢' : confPct >= 50 ? '🟡' : '🔴';
+                const preview =
+                    '📝 *Draft Ready*\n\n' +
+                    `*To:* ${escape(record.recipient)}\n` +
+                    `*Subject:* ${escape(record.subject)}\n\n` +
+                    `_${escape(draftBody)}_\n\n` +
+                    `${confEmoji} Confidence: *${escape(String(confPct))}%*`;
+
+                await telegramService.sendWithButtons(chatId, preview, [[
+                    { text: '✅ Send', callback_data: `send_${callback.messageId}_${callback.userEmail || ''}` },
+                    { text: '✍️ Edit', callback_data: `edit_${callback.messageId}_${callback.userEmail || ''}` }
+                ]]);
+                break;
+            }
+
+            case 'edit': {
+                await telegramService.answerCallbackQuery(queryId, 'Reply with your revised draft');
+                await upsertDraftRecord(userId, callback.messageId, callback.userEmail, null);
+                editSessions.set(chatId, {
+                    messageId: callback.messageId,
+                    userEmail: callback.userEmail || '',
+                    createdAt: Date.now(),
+                });
+                await telegramService.sendMessage(chatId, '✍️ Send your revised email text as the next message.\n\nSend /cancel to stop editing.');
+                break;
+            }
+
+            case 'undo': {
+                await telegramService.answerCallbackQuery(queryId, 'Trying to undo…');
+                const result = await sendAgent.undoSend(userId, callback.messageId, callback.userEmail);
+                if (result.success) {
+                    await telegramService.editMessage(chatId, telegramMsgId, '↩️ *Email Recalled*\n_Moved to trash within Gmail\'s undo window\._');
+                } else {
+                    await telegramService.sendMessage(chatId, `❌ Undo failed: ${escape(result.message)}`);
+                }
+                break;
+            }
+
+            case 'reject':
+                await telegramService.answerCallbackQuery(queryId, 'Draft dismissed');
+                await telegramService.editMessage(chatId, telegramMsgId, '🚫 *Draft Dismissed*\n_No email was sent\._');
+                break;
+
+            case 'ignore':
+            case 'skip':
+            case 'later':
+                await telegramService.answerCallbackQuery(queryId, 'Acknowledged');
+                await telegramService.editMessage(chatId, telegramMsgId, `✅ *${escape(callback.action.charAt(0).toUpperCase() + callback.action.slice(1))}*\n_No email was sent\._`);
+                break;
+
+            case 'view_inbox':
+                await telegramService.answerCallbackQuery(queryId, 'Refreshing inbox…');
+                await telegramCommands.handleInbox(chatId, userId);
+                break;
+
+            case 'handle_routine':
+                await telegramService.answerCallbackQuery(queryId, 'Refreshing drafts…');
+                await telegramCommands.handlePending(chatId, userId);
+                break;
+
+            case 'send_all_pending': {
+                await telegramService.answerCallbackQuery(queryId, 'Sending queued drafts...');
+                const { data: drafts } = await supabase
+                    .from('pending_sends')
+                    .select('*')
+                    .eq('user_id', userId)
+                    .eq('status', 'pending')
+                    .order('created_at', { ascending: true });
+
+                if (!drafts || drafts.length === 0) {
+                    await telegramService.sendMessage(chatId, '✅ There are no pending drafts to send\.');
+                    return;
+                }
+
+                let sentCount = 0;
+                for (const draft of drafts) {
+                    try {
+                        await sendAgent.sendEmail(userId, draft, 0, draft.user_email);
+                        await supabase.from('pending_sends')
+                            .update({ status: 'sent' })
+                            .eq('id', draft.id);
+                        sentCount++;
+                    } catch (err) {
+                        logger.error('Telegram', 'SendAllPending', `Failed to send pending draft ${draft.id}`, err);
+                    }
+                }
+
+                await telegramService.sendMessage(chatId, `✅ Sent *${sentCount}* pending draft\(s\)\.`);
+                break;
+            }
+
+            case 'dismiss_all_pending':
+                await telegramService.answerCallbackQuery(queryId, 'Not supported');
+                await telegramService.sendMessage(chatId, '⚠️ Bulk dismiss is not enabled\. Use /pending to review drafts individually\.');
+                break;
+
+            case 'update_tone':
+                await telegramService.answerCallbackQuery(queryId, 'Tone review noted');
+                await telegramCommands.handleTone(chatId, '', userId);
+                break;
+
+            case 'show_help':
+                await telegramService.answerCallbackQuery(queryId, 'Loading commands…');
+                await telegramCommands.handleHelp(chatId);
+                break;
+
+            case 'refresh_status':
+                await telegramService.answerCallbackQuery(queryId, 'Refreshing…');
+                await telegramCommands.handleStatus(chatId);
+                break;
+
+            case 'keep_tone':
+                await telegramService.answerCallbackQuery(queryId, 'Keeping current tone');
+                await telegramService.sendMessage(chatId, '🎨 Kept the current tone guidance\.');
+                break;
+
+            case 'ai_draft':
+            case 'cancel_draft':
+            case 'followup':
+            case 'dismiss_fw':
+                await telegramService.answerCallbackQuery(queryId, 'Not implemented');
+                await telegramService.sendMessage(chatId, 'ℹ️ That workflow is not fully configured yet\. No action was taken\.');
+                break;
+
+            default:
+                // Handle set_tone_* callbacks dynamically
+                if (callback.action.startsWith('set_tone_')) {
+                    const tone = callback.action.replace('set_tone_', '');
+                    await telegramService.answerCallbackQuery(queryId, `Setting tone: ${tone}`);
+                    await telegramCommands.handleTone(chatId, tone, userId);
+                    break;
+                }
+                await telegramService.answerCallbackQuery(queryId);
         }
     } catch (err) {
         logger.error('Telegram', 'CallbackHandler', `Failed for ${callback.action}`, err);
@@ -455,4 +489,5 @@ async function handleCallbackQuery(queryId, chatId, telegramMsgId, callback, use
     }
 }
 
+export { handleUpdate };
 export default router;

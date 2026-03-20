@@ -4,6 +4,8 @@ import { supabase } from './config/supabase.js';
 import { logger } from './utils/logger.js';
 import { VELOX } from './config/constants.js';
 import { scheduler } from './utils/scheduler.js';
+import { telegramService } from './services/telegram.js';
+import { handleUpdate } from './server/telegram.js';
 
 async function startServer() {
     /* eslint-disable no-console */
@@ -35,15 +37,33 @@ async function startServer() {
         // 3. Initialize background jobs
         scheduler.start();
 
-        // 4. Set Telegram Webhook if on a public URL
-        const isRender = env.googleRedirectUri.includes('onrender.com');
-        if (isRender || env.nodeEnv === 'production') {
-            const baseUrl = env.googleRedirectUri.replace('/auth/google/callback', '');
-            import('./services/telegram.js').then(({ telegramService }) => {
-                telegramService.setWebhook(baseUrl);
-            }).catch(err => {
-                logger.error('Velox', 'Startup', 'Failed to load telegramService for webhook', err);
+        // 4. Telegram — polling (dev) vs webhook (production)
+        if (telegramService.isPolling()) {
+            // Development: the bot is already polling via node-telegram-bot-api.
+            // Register event listeners that feed updates into the same handleUpdate() logic.
+            const bot = telegramService.getBot();
+
+            bot.on('message', (msg) => {
+                handleUpdate({ message: msg }).catch((err) => {
+                    logger.error('Telegram', 'PollingMessage', 'Failed to process message', err);
+                });
             });
+
+            bot.on('callback_query', (query) => {
+                handleUpdate({ callback_query: query }).catch((err) => {
+                    logger.error('Telegram', 'PollingCallback', 'Failed to process callback', err);
+                });
+            });
+
+            bot.on('polling_error', (err) => {
+                logger.error('Telegram', 'Polling', 'Polling error', err);
+            });
+
+            logger.info('Velox', 'Startup', 'Telegram bot running in POLLING mode (development)');
+        } else {
+            // Production: set webhook so Telegram pushes updates to Express routes.
+            const baseUrl = env.googleRedirectUri.replace('/auth/google/callback', '');
+            telegramService.setWebhook(baseUrl);
         }
 
     } catch (err) {
