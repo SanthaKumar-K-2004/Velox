@@ -61,9 +61,11 @@ async function startServer() {
 
             logger.info('Velox', 'Startup', 'Telegram bot running in POLLING mode (development)');
         } else {
-            // Production: set webhook so Telegram pushes updates to Express routes.
-            const baseUrl = env.googleRedirectUri.replace('/auth/google/callback', '');
-            telegramService.setWebhook(baseUrl);
+            // Production: Webhook mode
+            const externalUrl = process.env.PUBLIC_URL || process.env.BASE_URL || process.env.RENDER_EXTERNAL_URL || 'https://velox-f2uy.onrender.com';
+            const webhookUrl = `${externalUrl.replace(/\/$/, '')}/webhook/telegram`;
+            await telegramService.getBot().setWebHook(webhookUrl);
+            logger.info('Telegram', 'Webhook', `Production Webhook active and pointing to ${webhookUrl}`);
         }
 
     } catch (err) {
