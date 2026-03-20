@@ -1,3 +1,4 @@
+import { env } from '../config/env.js';
 import { supabase } from '../config/supabase.js';
 import { aiService } from '../services/ai.js';
 import { gmailService } from '../services/gmail.js';
@@ -20,6 +21,15 @@ export const memoryAgent = {
         const { data } = await supabase
             .from('memory')
             .select('tone_style, formality_score, sign_off, phrase_bank, writing_quirks')
+            .eq('user_id', userId)
+            .single();
+        return data || this.getDefaultMemory();
+    },
+
+    async getMemoryContext(userId) {
+        const { data } = await supabase
+            .from('memory')
+            .select('*')
             .eq('user_id', userId)
             .single();
         return data || this.getDefaultMemory();
@@ -113,7 +123,7 @@ ${emailTexts.substring(0, 20000)}
 """
 `;
                 const result = await aiService.callAI(prompt, 'You are a writing style analyst.', userId);
-                analysis = JSON.parse(helpers.extractJSON(result));
+                analysis = helpers.parseJSON(result, {});
             }
 
             // 4. Update memory table (upsert)
@@ -153,7 +163,18 @@ ${emailTexts.substring(0, 20000)}
 
     async handleOnboardingMessage(userId, text) {
         const { data: user } = await supabase.from('users').select('onboarding_status, onboarding_data, telegram_chat_id').eq('id', userId).single();
-        if (!user || user.onboarding_status === 'done' || user.onboarding_status === 'not_started') return;
+        if (!user || user.onboarding_status === 'done') return;
+
+        // If not started, it means they haven't connected Gmail yet (bootstrap hasn't run)
+        if (user.onboarding_status === 'not_started') {
+            const startLink = `${(process.env.RENDER_EXTERNAL_URL ? process.env.RENDER_EXTERNAL_URL + '/auth/google' : env.googleRedirectUri.replace('/auth/google/callback', '/auth/google'))}?userId=${userId}`;
+            return telegramService.sendMessage(user.telegram_chat_id,
+                "👋 I'm ready to help, but I haven't connected to your Gmail yet!\n\n" +
+                'Please click the link below to securely link your account so I can start monitoring your emails:\n\n' +
+                `🔗 [Connect Gmail](${startLink})\n\n` +
+                "Once connected, I'll analyze your writing style and we can finish the setup!"
+            );
+        }
 
         const currentStep = parseInt(user.onboarding_status.replace('q', ''));
         const nextStep = currentStep + 1;
@@ -206,7 +227,7 @@ Original AI Draft: "${interaction.aiDraft}"
 Final User Sent: "${interaction.finalSent}"
 `;
                 const result = await aiService.callAI(diffPrompt, 'Reply ONLY with valid JSON.', userId);
-                const diff = JSON.parse(helpers.extractJSON(result));
+                const diff = helpers.parseJSON(result, {});
 
                 // Fetch existing patterns
                 const { data: mem } = await supabase.from('memory').select('edit_patterns, formality_score').eq('user_id', userId).single();
@@ -263,7 +284,7 @@ Return JSON: { "formality_score": 0-100 }
 """${emailText.substring(0, 10000)}"""`;
 
             const result = await aiService.callAI(prompt, 'Reply ONLY in valid JSON.', userId);
-            const score = JSON.parse(helpers.extractJSON(result)).formality_score;
+            const score = helpers.parseJSON(result, {}).formality_score;
 
             const { data: mem } = await supabase.from('memory').select('formality_score').eq('user_id', userId).single();
             if (mem && Math.abs(mem.formality_score - score) > 15) {

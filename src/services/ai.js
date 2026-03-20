@@ -9,39 +9,57 @@ export const aiService = {
     genAI: new GoogleGenerativeAI(env.geminiApiKey),
 
     /**
-     * Primary AI call with tracking and fallbacks
+     * Primary AI call with tracking, randomized load balancing, and fallbacks
      */
-    async callAI(prompt, systemInstruction = '', userId = null) {
-        let retries = 2;
-        while (retries > 0) {
+    async callAI(prompt, systemInstruction = '', userId = null, file = null) {
+        const providers = [
+            {
+                name: 'gemini',
+                method: () => (file
+                    ? this.callGeminiVision(prompt, file, systemInstruction)
+                    : this.callGemini(prompt, systemInstruction)),
+                key: env.geminiApiKey,
+                model: file ? 'vision' : 'default',
+                supportsFiles: true
+            },
+            {
+                name: 'deepseek',
+                method: () => this.callDeepSeek(prompt, systemInstruction),
+                key: env.deepseekApiKey,
+                model: 'default',
+                supportsFiles: false
+            },
+            {
+                name: 'nvidia',
+                method: () => this.callNvidia(prompt, systemInstruction),
+                key: env.nvidiaApiKey,
+                model: 'default',
+                supportsFiles: false
+            }
+        ].filter((provider) => !!provider.key && (!file || provider.supportsFiles));
+
+        for (const provider of providers) {
             try {
-                const result = await this.callGemini(prompt, systemInstruction);
-                if (userId) {
-                    await this.recordUsage(userId, 'gemini', 'gemini-1.5-flash');
+                const result = await provider.method();
+                const normalized = typeof result === 'string' ? result.trim() : '';
+
+                if (!normalized) {
+                    throw new Error(`${provider.name} returned an empty response`);
                 }
-                return result;
+
+                if (userId) await this.recordUsage(userId, provider.name, provider.model);
+                return normalized;
             } catch (err) {
-                retries--;
-                logger.warn('AIService', 'GeminiFail', `Primary AI failed. Retries left: ${retries}. Error: ${err.message}`);
-                if (retries === 0 || err.status === 429) {
-                    try {
-                        const result = await this.callDeepSeek(prompt, systemInstruction);
-                        if (userId) await this.recordUsage(userId, 'deepseek', 'deepseek-chat');
-                        return result;
-                    } catch {
-                        try {
-                            const result = await this.callNvidia(prompt, systemInstruction);
-                            if (userId) await this.recordUsage(userId, 'nvidia', env.nvidiaModel);
-                            return result;
-                        } catch (err3) {
-                            logger.error('AIService', 'TotalFail', 'All AI providers failed. Using safe fallback.', err3);
-                            return this.getSafeFallback();
-                        }
-                    }
-                }
-                await new Promise(r => setTimeout(r, 2000));
+                logger.warn('AIService', 'Failover', `${provider.name} failed. Trying next. Error: ${err.message}`);
+                // If it's a rate limit or server error, continue to next provider
+                if (err.status === 429 || err.status >= 500 || err.message.includes('API error')) continue;
+                // For other errors, we might want to retry once
+                await new Promise(r => setTimeout(r, 1000));
             }
         }
+
+        logger.error('AIService', 'TotalFail', 'All AI providers failed. Using safe fallback.');
+        return this.getSafeFallback();
     },
 
     async recordUsage(userId, provider, model) {
@@ -196,13 +214,24 @@ export const aiService = {
 
     getSafeFallback() {
         return JSON.stringify({
-            draft_reply: "Thank you for your email. I'll review this and get back to you shortly.",
-            confidence: 100,
-            requires_human: true,
+            skip: false,
+            classification: 'unknown',
+            priority_score: 50,
+            urgency: 'medium',
+            summary: 'AI response unavailable; manual review required.',
+            intent: 'other',
+            hard_stop: false,
+            hard_stop_reason: null,
+            entities: { dates: [], amounts: [], names: [], deadlines: [] },
+            draft_reply: null,
+            holding_reply: null,
+            confidence: 0,
             autonomy_level: 3,
-            priority_score: 60,
-            summary: 'Manual fallback response due to AI failure',
-            intent: 'other'
+            requires_human: true,
+            requires_human_reason: 'AI response unavailable',
+            follow_up_needed: false,
+            follow_up_in_days: null,
+            language_detected: 'en'
         });
     }
 };

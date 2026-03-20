@@ -1,3 +1,4 @@
+import { memoryAgent } from './memory.js';
 import { aiService } from '../services/ai.js';
 import { vaultAgent } from './vault.js';
 import { supabase } from '../config/supabase.js';
@@ -5,6 +6,20 @@ import { telegramService } from '../services/telegram.js';
 import { telegramCommands } from '../server/telegramCommands.js';
 import { logger } from '../utils/logger.js';
 import { helpers } from '../utils/helpers.js';
+
+const ALLOWED_INTENTS = new Set([
+    'chat',
+    'inbox',
+    'pending',
+    'vault_search',
+    'email_search',
+    'status_query',
+    'help',
+]);
+
+function escape(value) {
+    return telegramService.escapeMarkdown(value ?? '');
+}
 
 /**
  * Natural Language Handler (Omni-Router)
@@ -14,101 +29,152 @@ export const nlHandler = {
 
     async handle(userId, chatId, text) {
         try {
-            logger.info('NLHandler', 'Classify', `Classifying: "${text.substring(0, 50)}..."`);
+            logger.info('NLHandler', 'Conversational', `User: "${text.substring(0, 50)}"`);
 
-            // Fast-path common phrases to save API tokens
-            const lower = text.toLowerCase().trim();
-            if (lower === 'help' || lower === 'menu') return telegramCommands.handleHelp(chatId);
-            if (lower === 'inbox') return telegramCommands.handleInbox(chatId, userId);
-            if (lower === 'pending') return telegramCommands.handlePending(chatId, userId);
-            if (lower === 'vault') return telegramCommands.handleVault(chatId, userId);
+            const memory = await memoryAgent.getCoreMemory(userId);
+            const { data: history } = await supabase.from('conversation_history')
+                .select('role, content')
+                .eq('user_id', userId)
+                .order('created_at', { ascending: false })
+                .limit(6);
 
-            const prompt = `
-Classify this user message into exactly one of these categories:
-- inbox: wants to check today's important emails or unread messages
-- pending: wants to check drafts awaiting approval
-- vault_list: wants to see recent stored documents
-- vault_search: looking for a specific stored document (receipt, ticket, invoice, etc.)
-- email_search: looking for a past email or checking if someone replied
-- draft_request: wants to compose/send a new email
-- status_query: asking about an email thread, API usage, or system health status
-- sent_list: wants to check emails sent today
-- away_mode: wants to pause auto-sending or go on vacation
-- resume_mode: wants to resume auto-sending or come back from vacation
-- vip_add: wants to mark a sender as VIP or prioritize them
-- ignore_add: wants to silence/ignore a sender or mute them
-- tone_update: wants to change the AI's writing style (formal, casual, friendly, direct)
-- help: wants to see commands or needs assistance
+            await supabase.from('conversation_history').insert({
+                user_id: userId,
+                role: 'user',
+                content: text
+            });
 
-Message: "${text}"
-
-Return ONLY valid JSON:
-{
-  "type": "inbox | pending | vault_list | vault_search | email_search | draft_request | status_query | sent_list | away_mode | resume_mode | vip_add | ignore_add | tone_update | help",
-  "extracted_params": {
-    "query": "search term if applicable",
-    "recipient": "email address if applicable",
-    "subject": "subject if applicable",
-    "sender": "sender name or email if applicable",
-    "hours": "number of hours if away mode (default 24)",
-    "tone": "formal | casual | friendly | direct"
-  }
-}`;
-
-            const result = await aiService.callAI(prompt, 'Reply ONLY with valid JSON. No explanation.', userId);
-            const intent = JSON.parse(helpers.extractJSON(result));
-
-            logger.info('NLHandler', 'IntentParsed', `Mapped to type: ${intent.type}`);
+            const intent = await this.classifyIntent(userId, text, memory, history || []);
 
             switch (intent.type) {
-            case 'inbox': return telegramCommands.handleInbox(chatId, userId);
-            case 'pending': return telegramCommands.handlePending(chatId, userId);
-            case 'vault_list': return telegramCommands.handleVault(chatId, userId);
-            case 'sent_list': return telegramCommands.handleSent(chatId, userId);
-            case 'away_mode': return telegramCommands.handleAway(chatId, intent.extracted_params?.hours || 24, userId);
-            case 'resume_mode': return telegramCommands.handleBack(chatId, userId);
-            case 'vip_add': return telegramCommands.handleVip(chatId, `add ${intent.extracted_params?.sender || ''}`, userId);
-            case 'ignore_add': return telegramCommands.handleIgnore(chatId, `add ${intent.extracted_params?.sender || ''}`, userId);
-            case 'tone_update': return telegramCommands.handleTone(chatId, intent.extracted_params?.tone || 'casual', userId);
-            case 'help': return telegramCommands.handleHelp(chatId);
-
+            case 'inbox':
+                return telegramCommands.handleInbox(chatId, userId);
+            case 'pending':
+                return telegramCommands.handlePending(chatId, userId);
             case 'vault_search':
-                return this.handleVaultSearch(userId, chatId, text, intent.extracted_params);
+                return this.handleVaultSearch(userId, chatId, text, intent.extracted_params || {});
             case 'email_search':
-                return this.handleEmailSearch(userId, chatId, intent.extracted_params);
-            case 'draft_request':
-                return this.handleDraftRequest(userId, chatId, intent.extracted_params);
+                return this.handleEmailSearch(userId, chatId, intent.extracted_params || {});
             case 'status_query':
-                return this.handleStatusQuery(userId, chatId, intent.extracted_params);
-
-            default:
-                await telegramService.sendMessage(chatId,
-                    '🤔 I am not quite sure what you mean. Try saying:\n' +
-                        '• _"Show my inbox"_\n' +
-                        '• _"Did Rahul reply?"_\n' +
-                        '• _"Draft an email to john@x.com"_\n' +
-                        '• _"I\'m going away for 48 hours"_');
+                return this.handleStatusQuery(userId, chatId, intent.extracted_params || {});
+            case 'help':
+                return telegramCommands.handleHelp(chatId);
+            case 'chat':
+            default: {
+                const reply = await this.generateChatReply(userId, text, memory, history || []);
+                await telegramService.sendMessage(chatId, reply);
+                await supabase.from('conversation_history').insert({
+                    user_id: userId,
+                    role: 'assistant',
+                    content: reply
+                });
+                return;
+            }
             }
         } catch (err) {
-            logger.error('NLHandler', 'Error', `Failed to classify: "${text}"`, err);
-            await telegramService.sendMessage(chatId,
-                '❌ I couldn\'t process that intent. Try saying "help".');
+            logger.error('NLHandler', 'Error', `Failed to process text: "${text}"`, err);
+            await telegramService.sendMessage(chatId, 'I hit an internal error while processing that request. Please try again.');
         }
     },
 
+    async classifyIntent(userId, text, memory, history) {
+        const contextHistory = history
+            .slice()
+            .reverse()
+            .map((entry) => `${entry.role}: ${entry.content}`)
+            .join('\n');
+
+        const systemPrompt = `
+You classify the user's latest Telegram message for an email assistant.
+Do not roleplay tool execution. Do not claim you already searched, checked, sent, or found anything.
+Return JSON only.
+Allowed intents:
+- chat
+- inbox
+- pending
+- vault_search
+- email_search
+- status_query
+- help`;
+
+        const userPrompt = `
+Conversation context:
+${contextHistory || '[none]'}
+
+User profile:
+- Tone: ${memory.tone_style || 'friendly'}
+- Formality: ${memory.formality_score || 50}
+
+Latest user message:
+"${text}"
+
+Return JSON:
+{
+  "type": "chat | inbox | pending | vault_search | email_search | status_query | help",
+  "extracted_params": {
+    "query": "string or empty"
+  }
+}`;
+
+        const raw = await aiService.callAI(userPrompt, systemPrompt, userId);
+        const parsed = helpers.parseJSON(raw, {});
+        const type = ALLOWED_INTENTS.has(parsed.type) ? parsed.type : 'chat';
+
+        return {
+            type,
+            extracted_params: typeof parsed.extracted_params === 'object' && parsed.extracted_params !== null
+                ? parsed.extracted_params
+                : { query: text },
+        };
+    },
+
+    async generateChatReply(userId, text, memory, history) {
+        const contextHistory = history
+            .slice()
+            .reverse()
+            .map((entry) => `${entry.role}: ${entry.content}`)
+            .join('\n');
+
+        const systemPrompt = `
+You are Velox, an email assistant speaking to its user on Telegram.
+Stay grounded and concise.
+Do not claim you searched the inbox, checked status, or looked up documents unless the caller already completed that action.
+If the user asks for an inbox, draft, vault, search, or status action, answer briefly that you are routing it rather than inventing results.`;
+
+        const userPrompt = `
+Conversation context:
+${contextHistory || '[none]'}
+
+User profile:
+- Tone: ${memory.tone_style || 'friendly'}
+- Sign-off: ${memory.sign_off || 'Best,'}
+
+Reply to this message in 1-3 sentences:
+"${text}"`;
+
+        const raw = await aiService.callAI(userPrompt, systemPrompt, userId);
+        return helpers.cleanText(raw, 'How can I help with your inbox?');
+    },
+
     async handleVaultSearch(userId, chatId, originalText, params) {
-        await telegramService.sendMessage(chatId, `🔍 Searching vault for: _${params.query || originalText}_...`);
-        const result = await vaultAgent.findDocument(userId, params.query || originalText);
+        const query = helpers.cleanText(params.query, originalText);
+        await telegramService.sendMessage(chatId, `Searching the vault for _${escape(query)}_...`);
 
-        if (!result.found) return telegramService.sendMessage(chatId, `❌ ${result.message}`);
+        const docs = await vaultAgent.findDocument(userId, query);
+        if (!docs || docs.length === 0) {
+            return telegramService.sendMessage(chatId, `No stored documents matched _${escape(query)}_.`);
+        }
 
-        let text = '📎 *Search Results*\n━━━━━━━━━━━━━━━━━\n\n';
-        result.docs.forEach(d => { text += `• ${d.vendor || 'Unknown'} — ${d.doc_type}\n  _${d.summary}_\n\n`; });
+        let text = '*Search Results*\n\n';
+        docs.forEach((doc) => {
+            text += `• ${escape(doc.vendor || 'Unknown')} - ${escape(doc.doc_type || 'document')}\n`;
+            text += `_${escape(doc.summary || 'No summary available')}_\n\n`;
+        });
         await telegramService.sendMessage(chatId, text);
     },
 
     async handleEmailSearch(userId, chatId, params) {
-        const sender = params.sender || params.query || '';
+        const sender = helpers.cleanText(params.sender || params.query, '');
         const { data: emails } = await supabase.from('email_history')
             .select('recipient, subject, sent_at, confidence')
             .eq('user_id', userId)
@@ -116,54 +182,69 @@ Return ONLY valid JSON:
             .order('sent_at', { ascending: false })
             .limit(5);
 
-        if (!emails || emails.length === 0) return telegramService.sendMessage(chatId, `❌ No past emails found matching _"${sender}"_.`);
+        if (!emails || emails.length === 0) {
+            return telegramService.sendMessage(chatId, `No past emails matched _${escape(sender || 'that search')}_.`);
+        }
 
-        let text = `📧 *Emails matching "${sender}"*\n━━━━━━━━━━━━━━━━━\n\n`;
-        emails.forEach((e, i) => {
-            const date = e.sent_at ? new Date(e.sent_at).toLocaleDateString() : 'unknown';
-            text += `${i + 1}. *To:* ${e.recipient}\n   _${e.subject}_\n   📅 ${date}\n\n`;
+        let text = `*Emails Matching "${escape(sender || 'recent')}"*\n\n`;
+        emails.forEach((email, index) => {
+            const date = email.sent_at ? new Date(email.sent_at).toLocaleDateString() : 'unknown';
+            text += `${index + 1}. *To:* ${escape(email.recipient || 'Unknown')}\n`;
+            text += `_${escape(email.subject || 'No subject')}_\n`;
+            text += `Date: ${escape(date)}\n\n`;
         });
         await telegramService.sendMessage(chatId, text);
     },
 
     async handleDraftRequest(userId, chatId, params) {
         if (!params.recipient) {
-            return telegramService.sendMessage(chatId, '✍️ To draft an email, please include the recipient (e.g., "Draft an email to john@example.com about the project").');
+            return telegramService.sendMessage(chatId, 'To draft an email, include the recipient address.');
         }
-        await telegramService.sendMessage(chatId, `✍️ Drafting email to *${params.recipient}*...\n_Subject: ${params.subject || 'TBD'}_`);
 
-        // Store as pending draft
+        await telegramService.sendMessage(chatId, `Drafting email to *${escape(params.recipient)}*...\n_Subject: ${escape(params.subject || 'TBD')}_`);
+
         const { data } = await supabase.from('pending_sends').insert({
-            user_id: userId, email_to: params.recipient, subject: params.subject || '', body: '', status: 'drafting',
+            user_id: userId,
+            email_to: params.recipient,
+            subject: params.subject || '',
+            body: '',
+            status: 'drafting',
         }).select().single();
 
         if (data) {
             await telegramService.sendWithButtons(chatId,
-                '📝 Draft outline created. Send me the body text, or I can generate it for you.\n\n_Reply directly with the email content or tap below._',
-                [[{ text: '🤖 AI Generate', callback_data: `ai_draft_${data.id}` }, { text: '❌ Cancel', callback_data: `cancel_draft_${data.id}` }]]
+                'Draft outline created. Send me the body text, or tap below to generate a draft.',
+                [[
+                    { text: 'AI Generate', callback_data: `ai_draft_${data.id}` },
+                    { text: 'Cancel', callback_data: `cancel_draft_${data.id}` }
+                ]]
             );
         }
     },
 
     async handleStatusQuery(userId, chatId, params) {
-        const query = params.sender || params.query || '';
+        const query = helpers.cleanText(params.sender || params.query, '');
 
-        // If query is empty or specifically asks for system status, use global status
         if (!query || query.toLowerCase() === 'system' || query.toLowerCase() === 'status') {
             return telegramCommands.handleStatus(chatId);
         }
 
         const { data: recent } = await supabase.from('email_history')
-            .select('*').eq('user_id', userId)
+            .select('*')
+            .eq('user_id', userId)
             .or(`recipient.ilike.%${query}%,subject.ilike.%${query}%`)
-            .order('sent_at', { ascending: false }).limit(3);
+            .order('sent_at', { ascending: false })
+            .limit(3);
 
-        if (!recent || recent.length === 0) return telegramService.sendMessage(chatId, `❓ I don't have any records matching _"${query}"_.`);
+        if (!recent || recent.length === 0) {
+            return telegramService.sendMessage(chatId, `I don't have any records matching _${escape(query)}_.`);
+        }
 
-        let text = `📊 *Status for "${query}"*\n━━━━━━━━━━━━━━━━━\n\n`;
-        recent.forEach(e => {
-            const sentDate = e.sent_at ? new Date(e.sent_at).toLocaleDateString() : '?';
-            text += `• *${e.recipient}* — ${e.subject}\n  Sent: ${sentDate}\n\n`;
+        let text = `*Status for "${escape(query)}"*\n\n`;
+        recent.forEach((entry) => {
+            const sentDate = entry.sent_at ? new Date(entry.sent_at).toLocaleDateString() : 'unknown';
+            text += `• *${escape(entry.recipient || 'Unknown')}* - ${escape(entry.subject || 'No subject')}\n`;
+            text += `Sent: ${escape(sentDate)}\n\n`;
         });
         await telegramService.sendMessage(chatId, text);
     },

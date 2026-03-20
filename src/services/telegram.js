@@ -19,6 +19,10 @@ function getBot() {
 
 export const telegramService = {
 
+    escapeMarkdown(text = '') {
+        return String(text).replace(/([_*[\]()`\\])/g, '\\$1');
+    },
+
     /**
      * Send a plain text message (Markdown V2 supported)
      */

@@ -91,7 +91,7 @@ Return ONLY valid JSON.
 `;
         const systemInstruction = 'You are a document analysis assistant. Extract metadata from the provided document.';
         const response = await aiService.callAI(prompt, systemInstruction, userId, file);
-        return JSON.parse(helpers.extractJSON(response));
+        return helpers.parseJSON(response, {});
     },
 
     /**
@@ -169,7 +169,7 @@ Return ONLY valid JSON.
     async findDocument(userId, naturalQuery) {
         const intentPrompt = `Extract search intent from: "${naturalQuery}". Return JSON {doc_type, vendor, date_hint, keywords[]}`;
         const intentRes = await aiService.callAI(intentPrompt, 'You extract search intents.', userId);
-        const intent = JSON.parse(helpers.extractJSON(intentRes));
+        const intent = helpers.parseJSON(intentRes, {});
 
         let query = supabase.from('vault_metadata').select('*').eq('user_id', userId);
         if (intent.doc_type) query = query.eq('doc_type', intent.doc_type);
@@ -177,8 +177,16 @@ Return ONLY valid JSON.
         if (intent.keywords?.length) query = query.ilike('summary', `%${intent.keywords[0]}%`);
 
         const { data, error } = await query.order('doc_date', { ascending: false }).limit(5);
-        if (error) throw error;
-        return data || [];
+        if (error) {
+            logger.error('Vault', 'SearchError', `Failed for query: ${naturalQuery}`, error);
+            return { found: false, docs: [], message: 'Search failed. Please try again.' };
+        }
+
+        if (!data || data.length === 0) {
+            return { found: false, docs: [], message: `No documents found matching _"${naturalQuery}"_.` };
+        }
+
+        return { found: true, docs: data, message: 'Found results' };
     },
 
     /**

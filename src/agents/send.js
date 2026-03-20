@@ -18,22 +18,29 @@ export const sendAgent = {
     async sendEmail(userId, draft, delayMs = 0, userEmail) {
         try {
             const accountEmail = userEmail || draft.user_email || draft.userEmail || null;
+            const recipient = draft.email_to || draft.to;
 
             if (draft.hard_stop) {
                 throw new Error('Hard stop - cannot send without user approval');
             }
 
+            if (!recipient) {
+                throw new Error('Recipient email is required before sending');
+            }
+
             if (delayMs > 0) {
-                logger.debug('SendAgent', 'Delay', `Waiting ${delayMs}ms before sending to ${draft.email_to}`);
+                logger.debug('SendAgent', 'Delay', `Waiting ${delayMs}ms before sending to ${recipient}`);
                 await new Promise((resolve) => setTimeout(resolve, delayMs));
             }
 
             const result = await gmailService.sendEmail(userId, {
-                to: draft.email_to,
+                to: recipient,
                 subject: draft.subject,
                 body: draft.body,
                 threadId: draft.thread_id,
-                attachments: [],
+                attachments: draft.attachments || [],
+                inReplyTo: draft.in_reply_to || draft.inReplyTo || null,
+                references: draft.references || null,
             }, accountEmail);
 
             const sentMessageId = result.id;
@@ -43,7 +50,7 @@ export const sendAgent = {
                 user_email: accountEmail,
                 message_id: sentMessageId,
                 thread_id: draft.thread_id,
-                recipient: draft.email_to,
+                recipient,
                 subject: draft.subject,
                 ai_draft: draft.ai_draft || draft.body,
                 final_sent: draft.body,
@@ -52,10 +59,10 @@ export const sendAgent = {
                 sent_at: new Date().toISOString(),
             });
 
-            logger.info('SendAgent', 'Sent', `Successfully sent email to ${draft.email_to} (ID: ${sentMessageId})`);
+            logger.info('SendAgent', 'Sent', `Successfully sent email to ${recipient} (ID: ${sentMessageId})`);
             return result;
         } catch (err) {
-            logger.error('SendAgent', 'Failed', `Failed to send email to ${draft.email_to}`, err);
+            logger.error('SendAgent', 'Failed', `Failed to send email to ${draft.email_to || draft.to || 'unknown recipient'}`, err);
             throw err;
         }
     },

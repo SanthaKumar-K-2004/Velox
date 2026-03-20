@@ -26,8 +26,42 @@ async function waitForRateLimit(chatId) {
     }
 }
 
+function escape(value) {
+    return telegramService.escapeMarkdown(value ?? '');
+}
+
+function truncate(value, max = 260) {
+    const text = String(value ?? '').trim();
+    if (text.length <= max) {
+        return text;
+    }
+
+    return `${text.slice(0, max - 1).trim()}…`;
+}
+
 function getAccountLabel(email) {
-    return email.userEmail ? `[${email.userEmail}] ` : '';
+    return email.userEmail ? `[${escape(email.userEmail)}] ` : '';
+}
+
+function formatDraftPreview(result) {
+    const draft = result.draft_reply || result.holding_reply;
+    if (!draft) {
+        return '_Manual review required. No safe draft was generated._';
+    }
+
+    return `_${escape(truncate(draft, 700))}_`;
+}
+
+function formatSummary(result, fallback) {
+    return escape(truncate(result.summary || fallback, 240));
+}
+
+function formatSubject(email) {
+    return escape(email.subject || 'No subject');
+}
+
+function formatSender(email) {
+    return escape(email.fromName || email.from || 'Unknown sender');
 }
 
 export const notificationAgent = {
@@ -47,7 +81,7 @@ export const notificationAgent = {
         case CONSTANTS.AUTONOMY_LEVELS.DRAFT_READY:
             return this.sendLevel1(chatId, aiResult, emailData);
         case CONSTANTS.AUTONOMY_LEVELS.WHITELISTED:
-            return this.sendLevel2Confirmation(chatId, aiResult, emailData);
+            return this.sendLevel2Confirmation(chatId, aiResult, emailData, autonomyDecision);
         default:
             return this.sendLevel1(chatId, aiResult, emailData);
         }
@@ -58,22 +92,27 @@ export const notificationAgent = {
      */
     async sendLevel3(chatId, result, email, decision) {
         const messageId = email.messageId || 'unknown';
+        const userEmail = email.userEmail || '';
         const text =
-            `${getAccountLabel(email)}URGENT\n\n` +
-            `From: ${email.fromName || email.from}\n` +
-            `Subject: ${email.subject}\n\n` +
-            'What they need\n' +
-            `${result.summary || 'Review required'}\n\n` +
-            'My draft reply\n' +
-            `_${result.draft_reply || 'No draft generated'}_\n\n` +
-            `Confidence: ${result.confidence || 0}% | ${result.intent || 'unknown'}\n` +
-            `${decision.autonomy_reason || 'Requires your approval'}`;
+            `*Urgent Review* ${getAccountLabel(email)}\n` +
+            `From: *${formatSender(email)}*\n` +
+            `Subject: ${formatSubject(email)}\n\n` +
+            `*AI Analysis*\n${formatSummary(result, 'Manual review required')}\n\n` +
+            `*Draft Reply*\n${formatDraftPreview(result)}\n\n` +
+            `Confidence: ${result.confidence || 0}% | ${escape(result.intent || 'unknown')}\n` +
+            `Reason: ${escape(decision.autonomy_reason || 'Manual approval requested')}`;
 
-        const buttons = [[
-            { text: 'Send', callback_data: `send_${messageId}` },
-            { text: 'Edit', callback_data: `edit_${messageId}` },
-            { text: 'Reject', callback_data: `reject_${messageId}` },
-        ]];
+        const buttons = [
+            [
+                { text: '✅ Send Draft', callback_data: `send_${messageId}_${userEmail}` },
+                { text: '✍️ Edit', callback_data: `edit_${messageId}_${userEmail}` }
+            ],
+            [
+                { text: '📖 Mark Read', callback_data: `read_${messageId}_${userEmail}` },
+                { text: '🗑️ Delete', callback_data: `trash_${messageId}_${userEmail}` },
+                { text: '❌ Reject', callback_data: `reject_${messageId}_${userEmail}` }
+            ]
+        ];
 
         const msg = await telegramService.sendWithButtons(chatId, text, buttons);
         logger.info('Notification', 'Level3', `Urgent notification sent for ${messageId}`);
@@ -85,22 +124,28 @@ export const notificationAgent = {
      */
     async sendLevel1(chatId, result, email) {
         const messageId = email.messageId || 'unknown';
+        const userEmail = email.userEmail || '';
         const text =
-            `${getAccountLabel(email)}Email from ${email.fromName || email.from}\n` +
-            `_${email.subject}_\n\n` +
-            `${result.summary || 'New email received'}\n\n` +
-            `_${result.draft_reply || 'No draft generated'}_\n\n` +
-            `Confidence: ${result.confidence || 0}% | ${result.intent || 'unknown'}`;
+            `*New Email* ${getAccountLabel(email)}\n` +
+            `From: *${formatSender(email)}*\n` +
+            `Subject: ${formatSubject(email)}\n\n` +
+            `*Summary*\n${formatSummary(result, 'New email received')}\n\n` +
+            `*Draft*\n${formatDraftPreview(result)}\n\n` +
+            `Confidence: ${result.confidence || 0}% | ${escape(result.intent || 'unknown')}`;
 
         const buttons = [
             [
-                { text: 'Send', callback_data: `send_${messageId}` },
-                { text: 'Edit', callback_data: `edit_${messageId}` },
+                { text: '✅ Send', callback_data: `send_${messageId}_${userEmail}` },
+                { text: '✍️ Edit', callback_data: `edit_${messageId}_${userEmail}` }
             ],
             [
-                { text: 'Later', callback_data: `later_${messageId}` },
-                { text: 'Skip', callback_data: `skip_${messageId}` },
+                { text: '📖 Mark Read', callback_data: `read_${messageId}_${userEmail}` },
+                { text: '🗑️ Delete', callback_data: `trash_${messageId}_${userEmail}` }
             ],
+            [
+                { text: '⏳ Later', callback_data: `later_${messageId}_${userEmail}` },
+                { text: '⏭️ Skip', callback_data: `skip_${messageId}_${userEmail}` }
+            ]
         ];
 
         const msg = await telegramService.sendWithButtons(chatId, text, buttons);
@@ -109,21 +154,19 @@ export const notificationAgent = {
     },
 
     /**
-     * Level 2 - whitelisted auto-send confirmation.
+     * Level 2 - queued for auto-send with delay.
      */
-    async sendLevel2Confirmation(chatId, result, email) {
-        const messageId = email.messageId || 'unknown';
+    async sendLevel2Confirmation(chatId, result, email, decision) {
+        const delayMins = decision.delay_mins || 3;
         const text =
-            `${getAccountLabel(email)}Sent - ${email.fromName || email.from}\n\n` +
-            `_${(result.draft_reply || '').substring(0, 100)}..._\n\n` +
-            'Sent just now';
+            `*Auto-Send Scheduled* ${getAccountLabel(email)}\n` +
+            `To: *${formatSender(email)}*\n` +
+            `Subject: ${formatSubject(email)}\n\n` +
+            `${formatDraftPreview(result)}\n\n` +
+            `Queued to send in ${delayMins} minute(s) if nothing changes.`;
 
-        const buttons = [[
-            { text: 'Undo (15m left)', callback_data: `undo_${messageId}` },
-        ]];
-
-        const msg = await telegramService.sendWithButtons(chatId, text, buttons);
-        logger.info('Notification', 'Level2', `Auto-sent confirmation for ${messageId}`);
+        const msg = await telegramService.sendMessage(chatId, text);
+        logger.info('Notification', 'Level2', `Queued auto-send notification for ${email.messageId || 'unknown'}`);
         return msg;
     },
 
@@ -132,15 +175,30 @@ export const notificationAgent = {
      */
     async notifyBucketA(chatId, email, signals) {
         await waitForRateLimit(chatId);
+        const messageId = email.messageId || 'unknown';
+        const userEmail = email.userEmail || '';
+        const snippet = escape(truncate(email.snippet || 'No preview available', 260));
+        const tags = signals.map((signal) => `\`#${escape(signal)}\``).join(' ');
 
         const text =
-            `${getAccountLabel(email)}Important Email Detected\n\n` +
-            `From: ${email.fromName || email.from}\n` +
-            `Subject: ${email.subject}\n\n` +
-            `${email.snippet || 'No preview available'}\n\n` +
-            `Signals: ${signals.join(', ')}`;
+            `*Attention Required* ${getAccountLabel(email)}\n` +
+            `From: *${formatSender(email)}*\n` +
+            `Subject: ${formatSubject(email)}\n\n` +
+            `${snippet}\n\n` +
+            (tags ? `Tags: ${tags}` : '');
 
-        const msg = await telegramService.sendMessage(chatId, text);
+        const buttons = [
+            [
+                { text: '🤖 Smart Reply', callback_data: `ai_reply_${messageId}_${userEmail}` },
+                { text: '📖 Mark Read', callback_data: `read_${messageId}_${userEmail}` }
+            ],
+            [
+                { text: '🗑️ Delete', callback_data: `trash_${messageId}_${userEmail}` },
+                { text: '📞 Open Thread', url: `https://mail.google.com/mail/u/${userEmail}/#inbox/${email.threadId || ''}` }
+            ]
+        ];
+
+        const msg = await telegramService.sendWithButtons(chatId, text, buttons);
         logger.info('Notification', 'BucketA', `Alert sent for ${email.messageId}`);
         return msg;
     },
@@ -151,7 +209,7 @@ export const notificationAgent = {
     async sendSystemAlert(chatId, title, message) {
         await waitForRateLimit(chatId);
 
-        const text = `${title}\n\n${message}`;
+        const text = `*${escape(title)}*\n\n${escape(message)}`;
         return telegramService.sendMessage(chatId, text);
     },
 };

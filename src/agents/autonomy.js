@@ -151,9 +151,7 @@ export const autonomyAgent = {
         const senderName = email.fromName || email.from?.split('@')[0] || 'there';
         const signOff = memory.sign_off || 'Best,';
 
-        return `Hi ${senderName}, thanks for reaching out — ` +
-            'I\'ll give this proper attention and get back to you ' +
-            `${timeEstimate}. ${signOff}`;
+        return `Hi ${senderName}, thanks for reaching out. I will review this properly and get back to you ${timeEstimate}. ${signOff}`;
     },
 
     /**
@@ -175,12 +173,14 @@ export const autonomyAgent = {
             try {
                 logger.info('Autonomy', 'SendPending', `Dispatching ${send.id} to Send Agent`);
 
-                await sendAgent.sendEmail(send.user_id, {
+                const sentResult = await sendAgent.sendEmail(send.user_id, {
                     email_to: send.email_to,
                     subject: send.subject,
                     body: send.body,
                     thread_id: send.thread_id
                 }, 0, send.user_email);
+
+                const sentMessageId = sentResult.id;
 
                 await supabase
                     .from('pending_sends')
@@ -189,9 +189,10 @@ export const autonomyAgent = {
 
                 const { data: user } = await supabase.from('users').select('telegram_chat_id').eq('id', send.user_id).single();
                 if (user?.telegram_chat_id) {
-                    await telegramService.sendMessage(user.telegram_chat_id, `✅ *Sent automatically*\nTo: ${send.email_to}\nSubject: ${send.subject}`, {
+                    const notifyText = `🚀 *Sent via Velox*\n\nYour draft to *${send.email_to}* regarding "${send.subject}" has been dispatched automatically.`;
+                    await telegramService.sendMessage(user.telegram_chat_id, notifyText, {
                         reply_markup: {
-                            inline_keyboard: [[{ text: '↩️ Undo', callback_data: `undo_${send.id}` }]]
+                            inline_keyboard: [[{ text: '↩️ Undo', callback_data: `undo_${sentMessageId}_${send.user_email}` }]]
                         }
                     });
                 }

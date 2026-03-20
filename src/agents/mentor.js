@@ -2,6 +2,7 @@ import { supabase } from '../config/supabase.js';
 import { telegramService } from '../services/telegram.js';
 import { gmailService } from '../services/gmail.js';
 import { memoryAgent } from './memory.js';
+import { aiService } from '../services/ai.js';
 import { logger } from '../utils/logger.js';
 import { VELOX } from '../config/constants.js';
 
@@ -64,23 +65,21 @@ export const mentorAgent = {
 
             const name = user?.user_name || 'there';
 
-            // Build the message
-            let text = `☀️ *Good morning, ${name}!*\n\n`;
-            text += '*Overnight activity:*\n';
-            text += `✅ ${handledCount || 0} emails sent/handled\n`;
-            text += `⏳ ${pending?.length || 0} need your attention\n`;
-            text += `📎 ${docsCount || 0} documents stored\n\n`;
-            text += '━━━━━━━━━━━━━━━━━\n';
+            // 3. Synthesize with AI
+            const stats = {
+                handled_24h: handledCount || 0,
+                pending_attention: pending?.length || 0,
+                pending_details: pending?.slice(0, 3).map(p => ({ to: p.email_to, sub: p.subject })),
+                docs_stored_24h: docsCount || 0
+            };
 
-            if (pending && pending.length > 0) {
-                text += '*Pending Action Required:*\n';
-                pending.slice(0, 3).forEach(p => {
-                    text += `🟡 *${p.email_to}* — ${p.subject}\n`;
-                });
-                if (pending.length > 3) text += `_...and ${pending.length - 3} more_\n`;
-            } else {
-                text += '_Your inbox is entirely clear._\n';
-            }
+            const prompt = `Generate a warm, professional morning digest for ${name}. 
+Stats: ${JSON.stringify(stats)}
+- Be encouraging and concise.
+- Mention specific pending items if any.
+- Use a premium, personal assistant tone.`;
+
+            const text = await aiService.callAI(prompt, 'Keep it strictly under 1000 characters.', userId);
 
             const { data: userRec } = await supabase.from('users').select('telegram_chat_id').eq('id', userId).single();
             if (userRec?.telegram_chat_id) {
@@ -127,16 +126,21 @@ export const mentorAgent = {
                 .eq('user_id', userId)
                 .gte('locked_at', today.toISOString());
 
-            const uptimeDays = Math.floor(process.uptime() / 86400);
+            const healthData = {
+                version: VELOX.VERSION,
+                uptime_days: Math.floor(process.uptime() / 86400),
+                api_calls_today: apiCalls || 0,
+                vault_mb: sizeMB,
+                emails_processed_today: emailCount || 0,
+                status: apiCalls > 1400 ? 'Warning: Near API Limit' : 'Healthy'
+            };
 
-            let text = '🩺 *Velox System Health*\n\n';
-            text += `Version: v${VELOX.VERSION}\n`;
-            text += `Uptime: ${uptimeDays} days\n`;
-            text += `Status: ${apiCalls > 1400 ? '🟡 Near Limit' : '🟢 Optimal'}\n\n`;
-            text += `🔹 *API Usage (Gemini):* ${apiCalls || 0}/1500\n`;
-            text += `🔹 *Vault Storage:* ${sizeMB} MB\n`;
-            text += `🔹 *Emails Today:* ${emailCount || 0}\n\n`;
-            text += '_All agents are online._';
+            const prompt = `Generate a concise system health report for the user.
+Data: ${JSON.stringify(healthData)}
+- Use medical or technical metaphors if appropriate.
+- Be clear about status.`;
+
+            const text = await aiService.callAI(prompt, 'Keep it short and professional.', userId);
 
             const { data: user } = await supabase.from('users').select('telegram_chat_id').eq('id', userId).single();
             if (user?.telegram_chat_id) {
@@ -166,16 +170,20 @@ export const mentorAgent = {
             const automatedCount = history?.filter(h => h.autonomy_level === 2).length || 0;
             const autoPercent = handledCount ? Math.round((automatedCount / handledCount) * 100) : 0;
 
-            let text = '📊 *Your week in email*\n\n';
-            text += `Handled: ${handledCount} emails\n`;
-            text += `Fully automated: ${automatedCount} (${autoPercent}%)\n\n`;
-            text += '━━━━━━━━━━━━━━━━━\n';
-            text += '💡 *Suggestions:*\n';
-            if (autoPercent < 30) {
-                text += '_Try whitelisting more categories to improve automation._\n';
-            } else {
-                text += '_Great automation rate! Keep adding to your whitelist._\n';
-            }
+            const weekData = {
+                handled: handledCount,
+                automated: automatedCount,
+                automation_rate: `${autoPercent}%`,
+                period: 'Last 7 days'
+            };
+
+            const prompt = `Generate a personal, insightful weekly performance report for the user.
+Data: ${JSON.stringify(weekData)}
+- Suggest improvements if automation is low.
+- Celebrate successes if automation is high.
+- Be concise but premium.`;
+
+            const text = await aiService.callAI(prompt, 'Keep it strictly under 1000 characters.', userId);
 
             const { data: user } = await supabase.from('users').select('telegram_chat_id').eq('id', userId).single();
             if (user?.telegram_chat_id) {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { google } from 'googleapis';
 import { env } from '../config/env.js';
 import { supabase } from '../config/supabase.js';
@@ -10,6 +11,194 @@ import { logger } from '../utils/logger.js';
 
 function normalizeAccountEmail(email) {
     return typeof email === 'string' ? email.trim().toLowerCase() : null;
+}
+
+function sanitizeHeader(value) {
+    return String(value ?? '').replace(/\r?\n/g, ' ').trim();
+}
+
+function sanitizeFilename(value) {
+    return sanitizeHeader(value).replace(/"/g, '\'') || 'attachment';
+}
+
+function encodeBase64Url(value) {
+    return Buffer.from(value)
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+}
+
+function decodeBase64Url(value) {
+    if (!value) return '';
+
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+
+    return Buffer.from(normalized + padding, 'base64').toString('utf-8');
+}
+
+function wrapBase64(value) {
+    return value.match(/.{1,76}/g)?.join('\r\n') || value;
+}
+
+function getHeader(headers, name) {
+    return headers.find((header) => header.name?.toLowerCase() === name.toLowerCase())?.value || '';
+}
+
+function extractEmailAddress(value) {
+    if (!value) return '';
+
+    const match = value.match(/<([^>]+)>/);
+    return (match ? match[1] : value).replace(/^mailto:/i, '').trim().toLowerCase();
+}
+
+function extractDisplayName(value) {
+    if (!value) return '';
+
+    const match = value.match(/^(.+?)\s*<.+>$/);
+    if (!match) return '';
+
+    return match[1].replace(/"/g, '').trim();
+}
+
+function decodeHtmlEntities(value) {
+    return value
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, '\'');
+}
+
+function stripHtml(value) {
+    if (!value) return '';
+
+    return decodeHtmlEntities(
+        value
+            .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+            .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+            .replace(/<(br|\/p|\/div|\/li|\/tr|\/h[1-6])>/gi, '\n')
+            .replace(/<[^>]+>/g, ' ')
+    )
+        .replace(/\r/g, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+}
+
+function collectBodyParts(part, bucket) {
+    if (!part) return;
+
+    if (Array.isArray(part.parts) && part.parts.length > 0) {
+        part.parts.forEach((child) => collectBodyParts(child, bucket));
+    }
+
+    const mimeType = (part.mimeType || '').toLowerCase();
+    const data = part.body?.data;
+
+    if (!data) {
+        return;
+    }
+
+    const decoded = decodeBase64Url(data);
+
+    if (mimeType === 'text/plain') {
+        bucket.plain.push(decoded.trim());
+    } else if (mimeType === 'text/html') {
+        bucket.html.push(stripHtml(decoded));
+    }
+}
+
+function extractBody(payload) {
+    if (!payload) return '';
+
+    const bucket = { plain: [], html: [] };
+    collectBodyParts(payload, bucket);
+
+    const plain = bucket.plain.filter(Boolean).join('\n\n').trim();
+    if (plain) return plain;
+
+    const html = bucket.html.filter(Boolean).join('\n\n').trim();
+    if (html) return html;
+
+    if (payload.body?.data) {
+        return stripHtml(decodeBase64Url(payload.body.data));
+    }
+
+    return '';
+}
+
+function hasAttachment(payload) {
+    if (!payload) return false;
+
+    if (payload.filename && payload.body?.attachmentId) {
+        return true;
+    }
+
+    if (!Array.isArray(payload.parts)) {
+        return false;
+    }
+
+    return payload.parts.some((part) => hasAttachment(part));
+}
+
+function buildRawMessage(draft) {
+    const attachments = Array.isArray(draft.attachments)
+        ? draft.attachments.filter((attachment) => attachment?.content)
+        : [];
+
+    const headers = [
+        `To: ${sanitizeHeader(draft.to)}`,
+        `Subject: ${sanitizeHeader(draft.subject)}`,
+        'MIME-Version: 1.0',
+    ];
+
+    if (draft.inReplyTo) {
+        headers.push(`In-Reply-To: ${sanitizeHeader(draft.inReplyTo)}`);
+    }
+
+    if (draft.references) {
+        headers.push(`References: ${sanitizeHeader(draft.references)}`);
+    }
+
+    if (attachments.length === 0) {
+        headers.push('Content-Type: text/html; charset="UTF-8"');
+        return `${headers.join('\r\n')}\r\n\r\n${draft.body || ''}`;
+    }
+
+    const boundary = `velox_${randomUUID()}`;
+    headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+
+    const parts = [
+        `--${boundary}`,
+        'Content-Type: text/html; charset="UTF-8"',
+        'Content-Transfer-Encoding: 7bit',
+        '',
+        draft.body || '',
+    ];
+
+    for (const attachment of attachments) {
+        const contentBuffer = Buffer.isBuffer(attachment.content)
+            ? attachment.content
+            : Buffer.from(attachment.content);
+        const base64 = wrapBase64(contentBuffer.toString('base64'));
+        const filename = sanitizeFilename(attachment.filename);
+
+        parts.push(
+            '',
+            `--${boundary}`,
+            `Content-Type: ${sanitizeHeader(attachment.contentType || 'application/octet-stream')}; name="${filename}"`,
+            `Content-Disposition: attachment; filename="${filename}"`,
+            'Content-Transfer-Encoding: base64',
+            '',
+            base64
+        );
+    }
+
+    parts.push('', `--${boundary}--`);
+    return `${headers.join('\r\n')}\r\n\r\n${parts.join('\r\n')}`;
 }
 
 /**
@@ -34,7 +223,7 @@ export const gmailService = {
      */
     async getAccount(userId, userEmail) {
         const normalizedEmail = normalizeAccountEmail(userEmail);
-        let query = supabase
+        const query = supabase
             .from('user_accounts')
             .select('email, gmail_token, updated_at')
             .eq('user_id', userId);
@@ -153,15 +342,19 @@ export const gmailService = {
                 userId: 'me',
                 id: threadId,
                 format: 'metadata',
+                metadataHeaders: ['From', 'Date', 'Subject'],
             }));
 
             return (res.data.messages || [])
                 .slice(-5)
-                .map((msg) => ({
-                    from: msg.payload.headers.find((header) => header.name === 'From')?.value,
-                    date: msg.payload.headers.find((header) => header.name === 'Date')?.value,
-                    snippet: msg.snippet,
-                }));
+                .map((msg) => {
+                    const headers = msg.payload?.headers || [];
+                    return {
+                        from: getHeader(headers, 'From'),
+                        date: getHeader(headers, 'Date'),
+                        snippet: msg.snippet,
+                    };
+                });
         } catch (err) {
             logger.error('GmailService', 'GetThreadHistory', `Failed to fetch thread ${threadId}`, err);
             return [];
@@ -171,32 +364,12 @@ export const gmailService = {
     /**
      * Sends an email via the Gmail API.
      * @param {string} userId
-     * @param {Object} draft { to, subject, body, threadId, attachments }
+     * @param {Object} draft { to, subject, body, threadId, attachments, inReplyTo, references }
      */
     async sendEmail(userId, draft, userEmail) {
         try {
             const gmail = await this.getClient(userId, userEmail);
-
-            const messageParts = [
-                `To: ${draft.to}`,
-                `Subject: ${draft.subject}`,
-                'Content-Type: text/html; charset=utf-8',
-                'MIME-Version: 1.0',
-                '',
-            ];
-
-            if (draft.threadId) {
-                messageParts.push(`In-Reply-To: ${draft.threadId}`);
-                messageParts.push(`References: ${draft.threadId}`);
-            }
-
-            messageParts.push(draft.body);
-
-            const raw = Buffer.from(messageParts.join('\n'))
-                .toString('base64')
-                .replace(/\+/g, '-')
-                .replace(/\//g, '_')
-                .replace(/=+$/, '');
+            const raw = encodeBase64Url(buildRawMessage(draft));
 
             const res = await withRetry(() => gmail.users.messages.send({
                 userId: 'me',
@@ -215,7 +388,7 @@ export const gmailService = {
     },
 
     /**
-     * Moves a message to trash (Undo Send).
+     * Moves a message to trash (Undo Send / delete).
      */
     async trashMessage(userId, messageId, userEmail) {
         try {
@@ -271,33 +444,37 @@ export const gmailService = {
 
             const msg = res.data;
             const headers = msg.payload?.headers || [];
-            const getHeader = (name) => headers.find((header) => header.name.toLowerCase() === name.toLowerCase())?.value || '';
+            const fromRaw = getHeader(headers, 'From');
+            const replyToRaw = getHeader(headers, 'Reply-To');
+            const dateHeader = getHeader(headers, 'Date');
+            const body = extractBody(msg.payload);
 
-            const fromRaw = getHeader('From');
-            const nameMatch = fromRaw.match(/^(.+?)\s*<(.+?)>$/);
-            const fromName = nameMatch ? nameMatch[1].replace(/"/g, '').trim() : '';
-            const fromEmail = nameMatch ? nameMatch[2] : fromRaw;
-
-            let body = '';
-            if (msg.payload?.body?.data) {
-                body = Buffer.from(msg.payload.body.data, 'base64').toString('utf-8');
-            } else if (msg.payload?.parts) {
-                const textPart = msg.payload.parts.find((part) => part.mimeType === 'text/plain');
-                if (textPart?.body?.data) {
-                    body = Buffer.from(textPart.body.data, 'base64').toString('utf-8');
+            let timestamp = new Date().toISOString();
+            if (msg.internalDate) {
+                timestamp = new Date(Number(msg.internalDate)).toISOString();
+            } else if (dateHeader) {
+                const parsedDate = new Date(dateHeader);
+                if (!Number.isNaN(parsedDate.getTime())) {
+                    timestamp = parsedDate.toISOString();
                 }
             }
 
             return {
                 id: msg.id,
                 threadId: msg.threadId,
-                from: fromEmail,
-                fromName,
-                to: getHeader('To'),
-                subject: getHeader('Subject'),
-                snippet: msg.snippet || '',
+                from: extractEmailAddress(fromRaw),
+                fromName: extractDisplayName(fromRaw),
+                replyTo: extractEmailAddress(replyToRaw) || extractEmailAddress(fromRaw),
+                to: getHeader(headers, 'To'),
+                subject: getHeader(headers, 'Subject') || 'No subject',
+                snippet: msg.snippet || body.slice(0, 240),
                 body,
                 labelIds: msg.labelIds || [],
+                messageIdHeader: getHeader(headers, 'Message-ID'),
+                references: getHeader(headers, 'References'),
+                date: dateHeader,
+                timestamp,
+                hasAttachment: hasAttachment(msg.payload),
             };
         } catch (err) {
             logger.error('GmailService', 'GetMessage', `Failed to get message ${messageId}`, err);
@@ -370,6 +547,20 @@ export const gmailService = {
     },
 
     /**
+     * Mark an email as read (remove UNREAD label)
+     */
+    async markAsRead(userId, messageId, userEmail) {
+        const gmail = await this.getClient(userId, userEmail);
+        return withRetry(() => gmail.users.messages.batchModify({
+            userId: 'me',
+            requestBody: {
+                ids: [messageId],
+                removeLabelIds: ['UNREAD'],
+            }
+        }));
+    },
+
+    /**
      * Set up push notifications (watch) for an account.
      * @param {string} userId
      * @param {string} userEmail
@@ -382,7 +573,7 @@ export const gmailService = {
                 userId: 'me',
                 requestBody: {
                     labelIds: ['INBOX'],
-                    topicName: process.env.GMAIL_PUBSUB_TOPIC
+                    topicName: process.env.GMAIL_PUBSUB_TOPIC,
                 }
             }));
             logger.info('GmailService', 'Watch', `Push watch enabled for ${userEmail}. HistoryId: ${res.data.historyId}`);
