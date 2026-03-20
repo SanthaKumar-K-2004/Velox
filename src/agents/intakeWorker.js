@@ -6,6 +6,7 @@ import { autonomyAgent } from './autonomy.js';
 import { notificationAgent } from './notification.js';
 import { logger } from '../utils/logger.js';
 import { supabase } from '../config/supabase.js';
+import { gmailService } from '../services/gmail.js';
 
 /**
  * Velox — Intake Worker
@@ -13,6 +14,47 @@ import { supabase } from '../config/supabase.js';
  * Intake → Filter → Context → AI Brain → Autonomy → Notification
  */
 export const intakeWorker = {
+
+    /**
+     * Process incoming push from Google Cloud Pub/Sub
+     * @param {string} userId 
+     * @param {string} userEmail 
+     * @param {string} historyId 
+     */
+    async processFromPush(userId, userEmail, historyId) {
+        try {
+            logger.debug('IntakeWorker', 'PushInit', `Checking pushed emails for ${userEmail}. HistoryId: ${historyId}`);
+            // Find recent unread emails (limit to 3 just in case multiple arrived at once)
+            const messages = await gmailService.listMessages(userId, 'is:unread', 3, userEmail);
+
+            for (const msg of messages) {
+                // Check if we already processed it
+                const { data: existing } = await supabase.from('email_history').select('message_id').eq('message_id', msg.id).maybeSingle();
+                if (existing) continue;
+
+                // We found a new message. Fetch the full message data.
+                const detail = await gmailService.getMessage(userId, msg.id, userEmail);
+
+                const payload = {
+                    messageId: detail.id,
+                    threadId: detail.threadId,
+                    subject: detail.subject,
+                    from: detail.from,
+                    date: new Date().toISOString(), // Fallback
+                    snippet: detail.snippet,
+                    userId,
+                    userEmail
+                };
+
+                logger.info('IntakeWorker', 'PushMatch', `New pushed email picked up for ${userEmail}: ${detail.id}`);
+
+                // Route through the standard pipeline
+                await this.process(payload);
+            }
+        } catch (err) {
+            logger.error('IntakeWorker', 'ProcessFromPush', `Failed to process push for ${userEmail}`, err);
+        }
+    },
 
     /**
      * Main processing pipeline

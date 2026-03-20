@@ -62,4 +62,51 @@ router.post('/', async (req, res, next) => {
     }
 });
 
+/**
+ * Handle incoming push notifications from Google Cloud Pub/Sub
+ */
+router.post('/gmail-push', async (req, res, next) => {
+    try {
+        const payload = req.body;
+
+        // Always ACK Pub/Sub immediately
+        res.status(200).send('OK');
+
+        if (!payload || !payload.message || !payload.message.data) {
+            logger.warn('Webhook', 'PubSub', 'Missing or invalid Pub/Sub payload');
+            return;
+        }
+
+        // Decode the base64 payload
+        const dataStr = Buffer.from(payload.message.data, 'base64').toString('utf-8');
+        const data = JSON.parse(dataStr);
+
+        const userEmail = normalizeEmail(data.emailAddress);
+        const historyId = data.historyId;
+
+        if (!userEmail) return;
+
+        const { data: account, error: accountError } = await supabase
+            .from('user_accounts')
+            .select('user_id')
+            .eq('email', userEmail)
+            .maybeSingle();
+
+        if (accountError || !account) {
+            logger.warn('Webhook', 'PubSubResolve', `Account not found for push: ${userEmail}`);
+            return;
+        }
+
+        logger.info('Webhook', 'PubSubPush', `Push received for ${userEmail}. HistoryId: ${historyId}`);
+
+        // Trigger the async worker to fetch and process new messages
+        intakeWorker.processFromPush(account.user_id, userEmail, historyId).catch(err => {
+            logger.error('Webhook', 'PushProcess', 'Failed to process push', err);
+        });
+
+    } catch (err) {
+        logger.error('Webhook', 'PubSub', 'Error handling push', err);
+    }
+});
+
 export default router;

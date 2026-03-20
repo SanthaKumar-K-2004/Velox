@@ -114,4 +114,16 @@ export const telegramService = {
     getBot() {
         return getBot();
     },
+
+    /**
+     * Get a direct download link for a Telegram file ID
+     */
+    async getFileLink(fileId) {
+        try {
+            return await getBot().getFileLink(fileId);
+        } catch (err) {
+            logger.error('Telegram', 'GetFileLink', `Failed to get link for ${fileId}`, err);
+            throw err;
+        }
+    }
 };

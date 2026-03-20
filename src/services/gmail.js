@@ -368,4 +368,43 @@ export const gmailService = {
             return [];
         }
     },
+
+    /**
+     * Set up push notifications (watch) for an account.
+     * @param {string} userId
+     * @param {string} userEmail
+     */
+    async watchAccount(userId, userEmail) {
+        if (!process.env.GMAIL_PUBSUB_TOPIC) return null;
+        try {
+            const gmail = await this.getClient(userId, userEmail);
+            const res = await withRetry(() => gmail.users.watch({
+                userId: 'me',
+                requestBody: {
+                    labelIds: ['INBOX'],
+                    topicName: process.env.GMAIL_PUBSUB_TOPIC
+                }
+            }));
+            logger.info('GmailService', 'Watch', `Push watch enabled for ${userEmail}. HistoryId: ${res.data.historyId}`);
+            return res.data;
+        } catch (err) {
+            logger.error('GmailService', 'Watch', `Failed to set up watch for ${userEmail}`, err);
+            throw err;
+        }
+    },
+
+    /**
+     * Stop push notifications.
+     */
+    async stopWatch(userId, userEmail) {
+        try {
+            const gmail = await this.getClient(userId, userEmail);
+            await withRetry(() => gmail.users.stop({ userId: 'me' }));
+            logger.info('GmailService', 'StopWatch', `Push watch disabled for ${userEmail}`);
+            return true;
+        } catch (err) {
+            logger.error('GmailService', 'StopWatch', `Failed to stop watch for ${userEmail}`, err);
+            throw err;
+        }
+    }
 };

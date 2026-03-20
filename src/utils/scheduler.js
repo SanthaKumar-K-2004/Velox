@@ -3,6 +3,7 @@ import { autonomyAgent } from '../agents/autonomy.js';
 import { supabase } from '../config/supabase.js';
 import { logger } from './logger.js';
 import { healthMonitor } from './healthMonitor.js';
+import { gmailService } from '../services/gmail.js';
 
 /**
  * Velox — Background Scheduler
@@ -77,10 +78,21 @@ export const scheduler = {
                 }
             });
 
-            // 2:00 AM — Nightly System Cleanup (Global, runs once)
+            // 2:00 AM — Nightly System Cleanup & API Renewals
             if (hours === 2 && minutes === 0) {
                 await healthMonitor.nightlyCleanup();
                 await healthMonitor.checkStorage();
+
+                // Renew Google Cloud Pub/Sub tokens (they expire every 7 days)
+                if (process.env.GMAIL_PUBSUB_TOPIC) {
+                    await this.runForAllAccounts(async (uId, uEmail) => {
+                        try {
+                            await gmailService.watchAccount(uId, uEmail);
+                        } catch (e) {
+                            logger.error('Scheduler', 'WatchRenew', `Failed to renew push token for ${uEmail}`, e);
+                        }
+                    });
+                }
             }
         }, 60 * 1000));
 
