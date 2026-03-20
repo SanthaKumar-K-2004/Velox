@@ -47,7 +47,7 @@ export const telegramCommands = {
 
             const text =
                 '👋 *Welcome to Velox*\n\n' +
-                'Your AI Email Copilot is ready. Connect your Gmail to get started.\n\n' +
+                `Your AI Email Copilot is ready. [🔗 Connect your Gmail](${connectUrl}) to get started.\n\n` +
                 'Once connected, I\'ll analyze your writing style and we can finish the setup.';
 
             // Use inline URL button — always clickable, enterprise-grade UX
